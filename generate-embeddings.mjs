@@ -160,14 +160,17 @@ async function generateEmbeddings() {
       const csvLines = subBatchRecords.map(record => {
         return Object.values(record).map(value => {
           const strValue = String(value);
-          if (strValue.includes(',') || strValue.includes('"') || strValue.includes('\n')) {
-            return `"${strValue.replace(/"/g, '""')}"`;
+          if (strValue.includes(',') || strValue.includes('\"') || strValue.includes('\n')) {
+            return `\"${strValue.replace(/\"/g, '\"\"')}\"`
           }
           return strValue;
         }).join(',');
       });
 
       fs.writeFileSync(batchFilePath, [header, ...csvLines].join('\n'));
+      console.log(`--- Content of ${batchFilePath} (Batch ${batchNumber}) ---`);
+      console.log(fs.readFileSync(batchFilePath, 'utf8'));
+      console.log(`---------------------------------`); 
 
       try {
         await ragApplication.addLoader(new CsvLoader({ filePathOrUrl: batchFilePath }));

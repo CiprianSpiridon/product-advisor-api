@@ -17,6 +17,6 @@
     "collectionName": "products"
   },
   "dataLoader": {
-    "csvPath": "../data/products.csv"
+    "csvPath": "../data/products-updated.csv"
   }
 } 

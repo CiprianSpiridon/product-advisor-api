@@ -214,11 +214,11 @@ app.post('/ask', async (req, res) => {
                 throw new Error("An item in relatedProducts does not have the required {sku: string, name: string, description: string} structure.");
             }
             
-            // Ensure all expected fields exist (add missing ones as empty strings)
-            const expectedFields = ['brand_default_store', 'features', 'recom_age', 'top_category', 'secondary_category'];
+            // Ensure all expected fields exist (add missing ones as empty strings or null)
+            const expectedFields = ['brand_default_store', 'features', 'recom_age', 'top_category', 'secondary_category', 'action', 'url', 'image', 'objectID'];
             for (const field of expectedFields) {
                 if (typeof item[field] !== 'string') {
-                    item[field] = '';
+                    item[field] = item[field] !== undefined ? String(item[field]) : ''; // Convert to string or use empty string
                 }
             }
         }
@@ -444,11 +444,11 @@ app.post('/chat', async (req, res) => {
                     throw new Error("An item in relatedProducts does not have the required {sku: string, name: string, description: string} structure.");
                 }
                 
-                // Ensure all expected fields exist (add missing ones as empty strings)
-                const expectedFields = ['brand_default_store', 'features', 'recom_age', 'top_category', 'secondary_category'];
+                // Ensure all expected fields exist (add missing ones as empty strings or null)
+                const expectedFields = ['brand_default_store', 'features', 'recom_age', 'top_category', 'secondary_category', 'action', 'url', 'image', 'objectID'];
                 for (const field of expectedFields) {
                     if (typeof item[field] !== 'string') {
-                        item[field] = '';
+                        item[field] = item[field] !== undefined ? String(item[field]) : ''; // Convert to string or use empty string
                     }
                 }
             }
