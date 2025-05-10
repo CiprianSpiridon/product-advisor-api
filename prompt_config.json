@@ -1,0 +1,9 @@
+{
+  "jsonOutputInstructions": {
+    "systemPreamble": "Your entire response MUST be a single, valid JSON object and nothing else. This JSON object must have exactly two top-level keys: 'answer' (string) and 'relatedProducts' (array). Do not include any text, explanations, or markdown formatting outside of this single JSON object response.",
+    "answerFieldDetails": "For the 'answer' key: Provide a natural language response to the user. When you discuss or suggest a specific product in this 'answer' string, you MUST include its SKU (e.g., 'ProductName (SKU: SKU123)').",
+    "relatedProductsFieldDetails": "For the 'relatedProducts' key: Provide an array of product OBJECTS. Each object in this array should represent a product that is related to the main products discussed or suggested in your 'answer'. Identify these related products and their details from the provided context documents. Each product object in the array MUST have the following keys: 'sku' (string), 'name' (string), and 'description' (string). Extract these details accurately. If the context documents explicitly list related SKUs for a primary product, try to find the full details for those SKUs in the provided context and include them as objects. If no specific related products are identified or applicable, or if their full details cannot be found in the context, this array should be empty ([]).",
+    "closingInstruction": "Based on the user's query, conversation history, any past information provided for the user, and the retrieved product context documents, generate your complete JSON response now."
+  },
+  "summarizationInstruction": "Summarize this conversation with a mom (User ID: {{userId}}) about baby products. Focus on her children's ages, preferences, and product interests relevant for future recommendations for her. Output only the summary text.\n\nConversation History:\n{{conversationHistoryText}}\n\nSummary:"
+} 
