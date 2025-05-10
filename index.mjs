@@ -12,6 +12,57 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs'; // For reading the prompt config file
 import { networkInterfaces } from 'os'; // Import networkInterfaces from os
+import { initDatabase, importProductsFromCSV, getProductsBySKUs, closeDatabase } from './db.mjs';
+
+// Simple in-memory cache implementation
+class QueryCache {
+  constructor(maxSize = 100, ttlInSeconds = 3600) {
+    this.cache = new Map();
+    this.maxSize = maxSize;
+    this.ttlInSeconds = ttlInSeconds;
+  }
+
+  generateKey(userId, query, userMetadata) {
+    // Create a unique key based on user ID, query, and metadata
+    const metadataString = JSON.stringify(userMetadata || {});
+    return `${userId}:${query}:${metadataString}`;
+  }
+
+  get(userId, query, userMetadata) {
+    const key = this.generateKey(userId, query, userMetadata);
+    const item = this.cache.get(key);
+    
+    if (!item) return null;
+    
+    // Check if the item has expired
+    if (Date.now() > item.expiresAt) {
+      this.cache.delete(key);
+      return null;
+    }
+    
+    return item.data;
+  }
+
+  set(userId, query, userMetadata, data) {
+    // Clean up if cache is full
+    if (this.cache.size >= this.maxSize) {
+      // Delete oldest entry
+      const oldestKey = this.cache.keys().next().value;
+      this.cache.delete(oldestKey);
+    }
+    
+    const key = this.generateKey(userId, query, userMetadata);
+    const expiresAt = Date.now() + (this.ttlInSeconds * 1000);
+    this.cache.set(key, { data, expiresAt });
+  }
+  
+  clear() {
+    this.cache.clear();
+  }
+}
+
+// Initialize the cache
+const queryCache = new QueryCache(100, 3600); // Maximum 100 entries, 1 hour TTL
 
 // Load environment variables
 dotenv.config({ path: path.join(path.dirname(fileURLToPath(import.meta.url)), './.env') });
@@ -122,6 +173,13 @@ app.post('/ask', async (req, res) => {
     });
   }
 
+  // Check cache first
+  const cachedResult = queryCache.get(userId, userQuery, { name: userName, children });
+  if (cachedResult) {
+    console.log(`Cache hit for query: "${userQuery.substring(0, 30)}..." by user ${userId}`);
+    return res.json(cachedResult);
+  }
+
   if (!conversationHistories[userId]) {
     conversationHistories[userId] = [];
   }
@@ -165,7 +223,22 @@ app.post('/ask', async (req, res) => {
   // console.log("Prompt for RAG (/ask):", promptForRAG); // For debugging
 
   try {
-    const result = await ragApplication.query(promptForRAG);
+    // Add a timeout promise
+    const timeout = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Request timed out after 15 seconds')), 15000);
+    });
+    
+    // Log warning about potential issue with SKUs
+    console.log("--- RAG Context Note (/ask) ---");
+    console.log("Executing RAG query - if no real SKUs are found, the LLM will return an empty array");
+    console.log("--------------------------------");
+    
+    // Race the RAG query against the timeout
+    const result = await Promise.race([
+      ragApplication.query(promptForRAG),
+      timeout
+    ]);
+    
     // Log the complete result object for debugging
     console.log("--- Complete RAG result object (/ask): ---");
     console.log(JSON.stringify(result, null, 2));
@@ -198,30 +271,28 @@ app.post('/ask', async (req, res) => {
         
         botResponseJson = JSON.parse(cleanedOutput);
 
-        // Validate the structure: answer (string) and relatedProducts (array of objects)
+        // Validate the structure: answer (string) and relatedProducts (array of strings)
         if (typeof botResponseJson.answer !== 'string' || !Array.isArray(botResponseJson.relatedProducts)) {
             console.warn("/ask: LLM output was valid JSON but not the expected top-level structure. LLM Raw:", llmOutputString);
             throw new Error("LLM output is not in the expected {answer: string, relatedProducts: array} format.");
         }
 
-        // Validate each item in relatedProducts
-        for (const item of botResponseJson.relatedProducts) {
-            if (typeof item !== 'object' || item === null ||
-                typeof item.sku !== 'string' ||
-                typeof item.name !== 'string' ||
-                typeof item.description !== 'string') {
-                console.warn("/ask: An item in relatedProducts has an invalid structure. Item:", item, "LLM Raw:", llmOutputString);
-                throw new Error("An item in relatedProducts does not have the required {sku: string, name: string, description: string} structure.");
-            }
-            
-            // Ensure all expected fields exist (add missing ones as empty strings or null)
-            const expectedFields = ['brand_default_store', 'features', 'recom_age', 'top_category', 'secondary_category', 'action', 'url', 'image', 'objectID'];
-            for (const field of expectedFields) {
-                if (typeof item[field] !== 'string') {
-                    item[field] = item[field] !== undefined ? String(item[field]) : ''; // Convert to string or use empty string
-                }
+        // Validate that relatedProducts contains strings (SKUs)
+        for (let i = 0; i < botResponseJson.relatedProducts.length; i++) {
+            if (typeof botResponseJson.relatedProducts[i] !== 'string') {
+                console.warn(`/ask: Item at index ${i} in relatedProducts is not a string. Converting to string.`);
+                botResponseJson.relatedProducts[i] = String(botResponseJson.relatedProducts[i]);
             }
         }
+        
+        // Look up full product details from SQLite
+        console.log(`Looking up ${botResponseJson.relatedProducts.length} products by SKU in SQLite database`);
+        const productDetails = await getProductsBySKUs(botResponseJson.relatedProducts);
+        console.log(`Found ${productDetails.length} matching products in database`);
+        
+        // Replace the array of SKUs with the array of product objects
+        botResponseJson.relatedProducts = productDetails;
+
     } catch (e) {
         console.error("/ask: Failed to parse LLM response as JSON or structure was invalid:", e.message);
         // console.error("/ask: LLM raw output was:", llmOutputString); // Already logged above
@@ -243,6 +314,13 @@ app.post('/ask', async (req, res) => {
         await storeMemory(userId, summary);
     }
 
+    // Store valid responses in cache
+    if (botResponseJson && typeof botResponseJson.answer === 'string' && 
+        botResponseJson.answer.trim() !== '' && 
+        botResponseJson.answer.indexOf('I had a little trouble formatting my response') === -1) {
+      queryCache.set(userId, userQuery, { name: userName, children }, botResponseJson);
+    }
+
     // Return the parsed and validated (or fallback) JSON as the top-level response
     res.json(botResponseJson);
 
@@ -261,7 +339,18 @@ app.post('/ask', async (req, res) => {
 // ========================================================================
 
 async function initializeApp() {
-    // Initialize RAG Application (adapt to your actual setup)
+    // Initialize SQLite database
+    console.log("Initializing SQLite database...");
+    const dbInitialized = await initDatabase();
+    if (!dbInitialized) {
+        console.error("FATAL ERROR: Could not initialize SQLite database. Exiting.");
+        process.exit(1);
+    }
+    
+    // Don't import products on server startup - this should only be done by generate-embeddings.mjs
+    // The database should already have products from running generate-embeddings.mjs
+
+    // Initialize RAG Application
     try {
         const dbPath = path.join(path.dirname(fileURLToPath(import.meta.url)), VECTOR_DB_PATH);
         
@@ -314,9 +403,10 @@ async function summarizeConversation(userId, conversationHistoryText) {
 
     // console.log(`Summarizing conversation for user: ${userId} with prompt:\n${filledPrompt}`);
     try {
-        // Assuming ragApplication.model.call or a similar method exists for direct LLM invocation
-        // If your RAGApplication doesn't expose a direct model.call, you might need a separate LLM client instance for summarization
-        const summary = await ragApplication.model.call(filledPrompt); 
+        // Use the query method of ragApplication directly instead of trying to access model.call
+        const result = await ragApplication.query(filledPrompt);
+        // Extract the answer from the result object
+        const summary = result.answer || result.content || result.text || result.response || '';
         return summary;
     } catch (e) {
         console.error("Error during summarization LLM call:", e);
@@ -353,6 +443,13 @@ app.post('/chat', async (req, res) => {
 
     if (!userQuery) {
         return res.status(400).json({ answer: "Query is required.", relatedProducts: [] });
+    }
+
+    // Check cache first
+    const cachedResult = queryCache.get(userId, userQuery, { name: userName, children });
+    if (cachedResult) {
+        console.log(`Cache hit for query: "${userQuery.substring(0, 30)}..." by user ${userId}`);
+        return res.json(cachedResult);
     }
 
     if (!conversationHistories[userId]) {
@@ -394,7 +491,22 @@ app.post('/chat', async (req, res) => {
     console.log("-----------------------------------");
 
     try {
-        const result = await ragApplication.query(promptForRAG);
+        // Add a timeout promise
+        const timeout = new Promise((_, reject) => {
+          setTimeout(() => reject(new Error('Request timed out after 15 seconds')), 15000);
+        });
+        
+        // Log warning about potential issue with SKUs
+        console.log("--- RAG Context Note (/chat) ---");
+        console.log("Executing RAG query - if no real SKUs are found, the LLM will return an empty array");
+        console.log("--------------------------------");
+        
+        // Race the RAG query against the timeout
+        const result = await Promise.race([
+          ragApplication.query(promptForRAG),
+          timeout
+        ]);
+        
         // Log the complete result object for debugging
         console.log("--- Complete RAG result object (/chat): ---");
         console.log(JSON.stringify(result, null, 2));
@@ -428,30 +540,28 @@ app.post('/chat', async (req, res) => {
             
             botResponseJson = JSON.parse(cleanedOutput);
 
-            // Validate the structure: answer (string) and relatedProducts (array of objects)
+            // Validate the structure: answer (string) and relatedProducts (array of strings)
             if (typeof botResponseJson.answer !== 'string' || !Array.isArray(botResponseJson.relatedProducts)) {
                 console.warn("/chat: LLM output was valid JSON but not the expected top-level structure. LLM Raw:", llmOutputString);
                 throw new Error("LLM output is not in the expected {answer: string, relatedProducts: array} format.");
             }
 
-            // Validate each item in relatedProducts
-            for (const item of botResponseJson.relatedProducts) {
-                if (typeof item !== 'object' || item === null ||
-                    typeof item.sku !== 'string' ||
-                    typeof item.name !== 'string' ||
-                    typeof item.description !== 'string') {
-                    console.warn("/chat: An item in relatedProducts has an invalid structure. Item:", item, "LLM Raw:", llmOutputString);
-                    throw new Error("An item in relatedProducts does not have the required {sku: string, name: string, description: string} structure.");
-                }
-                
-                // Ensure all expected fields exist (add missing ones as empty strings or null)
-                const expectedFields = ['brand_default_store', 'features', 'recom_age', 'top_category', 'secondary_category', 'action', 'url', 'image', 'objectID'];
-                for (const field of expectedFields) {
-                    if (typeof item[field] !== 'string') {
-                        item[field] = item[field] !== undefined ? String(item[field]) : ''; // Convert to string or use empty string
-                    }
+            // Validate that relatedProducts contains strings (SKUs)
+            for (let i = 0; i < botResponseJson.relatedProducts.length; i++) {
+                if (typeof botResponseJson.relatedProducts[i] !== 'string') {
+                    console.warn(`/chat: Item at index ${i} in relatedProducts is not a string. Converting to string.`);
+                    botResponseJson.relatedProducts[i] = String(botResponseJson.relatedProducts[i]);
                 }
             }
+            
+            // Look up full product details from SQLite
+            console.log(`Looking up ${botResponseJson.relatedProducts.length} products by SKU in SQLite database`);
+            const productDetails = await getProductsBySKUs(botResponseJson.relatedProducts);
+            console.log(`Found ${productDetails.length} matching products in database`);
+            
+            // Replace the array of SKUs with the array of product objects
+            botResponseJson.relatedProducts = productDetails;
+            
         } catch (e) {
             console.error("/chat: Failed to parse LLM response as JSON or structure was invalid:", e.message);
             console.error("/chat: LLM raw output:", llmOutputString);
@@ -475,6 +585,13 @@ app.post('/chat', async (req, res) => {
         if (conversationHistories[userId].length % 10 === 0 && conversationHistories[userId].length >= 10) {
             const summary = await summarizeConversation(userId, conversationHistories[userId].join("\n"));
             await storeMemory(userId, summary);
+        }
+
+        // Store valid responses in cache
+        if (botResponseJson && typeof botResponseJson.answer === 'string' && 
+            botResponseJson.answer.trim() !== '' && 
+            botResponseJson.answer.indexOf('I had a little trouble formatting my response') === -1) {
+            queryCache.set(userId, userQuery, { name: userName, children }, botResponseJson);
         }
 
         res.json(botResponseJson);
@@ -509,6 +626,13 @@ function getNetworkIPs() {
   }
   return results;
 }
+
+// Graceful shutdown handler
+process.on('SIGINT', async () => {
+    console.log('Shutting down gracefully...');
+    await closeDatabase();
+    process.exit(0);
+});
 
 initializeApp().then(() => {
     // Start server, listening on all network interfaces (0.0.0.0)

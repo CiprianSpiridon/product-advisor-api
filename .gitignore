@@ -18,6 +18,9 @@ temp_data/
 # Vector database (optional - uncomment if you don't want to commit these)
 vectordb/
 
+#products db
+products.db
+
 # Logs
 logs
 *.log

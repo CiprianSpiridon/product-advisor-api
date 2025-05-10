@@ -9,6 +9,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import { parse } from 'csv-parse/sync';
+import { initDatabase, importProductsFromCSV, closeDatabase } from './db.mjs';
 
 // Load environment variables and configuration
 dotenv.config({ path: path.join(path.dirname(fileURLToPath(import.meta.url)), './.env') });
@@ -69,8 +70,29 @@ function saveProgress(index) {
   }
 }
 
+async function importDataToSQLite() {
+  console.log('Step 1: Importing data to SQLite database...');
+  
+  // Initialize the database
+  const dbInitialized = await initDatabase();
+  if (!dbInitialized) {
+    console.error('Failed to initialize SQLite database');
+    return false;
+  }
+  
+  // Import products from CSV
+  const importResult = await importProductsFromCSV(csvPath);
+  if (!importResult) {
+    console.error('Failed to import products to SQLite database');
+    return false;
+  }
+  
+  console.log('Successfully imported products to SQLite database');
+  return true;
+}
+
 async function generateEmbeddings() {
-  console.log('Starting embedding generation process...');
+  console.log('Step 2: Starting embedding generation process...');
   console.log(`Loading products from ${csvPath}`);
   console.log(`Storing embeddings in ${dbPath}`);
 
@@ -81,7 +103,7 @@ async function generateEmbeddings() {
 
     const ragApplication = await new RAGApplicationBuilder()
       .setEmbeddingModel(new OpenAiEmbeddings({ batchSize: EMBEDDING_BATCH_SIZE }))
-      .setModel(SIMPLE_MODELS.OPENAI_GPT4_O)
+      .setModel(SIMPLE_MODELS.OPENAI_GPT4_TURBO)
       .setVectorDatabase(new LanceDb({ path: dbPath }))
       .setTemperature(TEMPERATURE)
       .setSearchResultCount(SEARCH_RESULT_COUNT)
@@ -158,7 +180,18 @@ async function generateEmbeddings() {
       const batchFilePath = path.join(tempDir, `_temp_api_batch_${batchNumber}.csv`);
       
       const csvLines = subBatchRecords.map(record => {
-        return Object.values(record).map(value => {
+        // Create a filtered version of the record without image and url
+        // but make sure to keep the SKU field
+        const filteredRecord = {...record};
+        delete filteredRecord.image;
+        delete filteredRecord.url;
+        
+        // Ensure SKU is present and properly formatted
+        if (!filteredRecord.sku || filteredRecord.sku.trim() === '') {
+          console.warn(`Warning: Record is missing a valid SKU: ${JSON.stringify(record)}`);
+        }
+        
+        return Object.values(filteredRecord).map(value => {
           const strValue = String(value);
           if (strValue.includes(',') || strValue.includes('\"') || strValue.includes('\n')) {
             return `\"${strValue.replace(/\"/g, '\"\"')}\"`
@@ -167,10 +200,20 @@ async function generateEmbeddings() {
         }).join(',');
       });
 
-      fs.writeFileSync(batchFilePath, [header, ...csvLines].join('\n'));
-      console.log(`--- Content of ${batchFilePath} (Batch ${batchNumber}) ---`);
-      console.log(fs.readFileSync(batchFilePath, 'utf8'));
-      console.log(`---------------------------------`); 
+      // Create a filtered header, removing image and url but keeping SKU
+      const headerFields = header.split(',');
+      const filteredHeader = headerFields.filter(field => field !== 'image' && field !== 'url').join(',');
+      
+      // Log SKU check for the first few records
+      if (batchNumber === 1) {
+        console.log("SKU Check for first 3 records:");
+        for (let i = 0; i < Math.min(3, subBatchRecords.length); i++) {
+          console.log(`Record ${i+1} - SKU: ${subBatchRecords[i].sku || 'MISSING'}`);
+        }
+      }
+
+      fs.writeFileSync(batchFilePath, [filteredHeader, ...csvLines].join('\n'));
+      console.log(`Created temporary batch file for ${subBatchRecords.length} records`);
 
       try {
         await ragApplication.addLoader(new CsvLoader({ filePathOrUrl: batchFilePath }));
@@ -209,14 +252,33 @@ async function generateEmbeddings() {
   }
 }
 
-// Execute the embedding generation
+// Execute both data import and embedding generation
 (async () => {
-  const success = await generateEmbeddings();
-  if (success) {
-    console.log('Embedding generation finished.');
+  try {
+    console.log("=== Starting combined data import and embedding generation ===");
+    
+    // Step 1: Import data to SQLite
+    const sqliteImportSuccess = await importDataToSQLite();
+    if (!sqliteImportSuccess) {
+      console.error('Failed to import data to SQLite. Stopping process.');
+      process.exit(1);
+    }
+    
+    // Step 2: Generate embeddings
+    const embeddingsSuccess = await generateEmbeddings();
+    if (!embeddingsSuccess) {
+      console.error('Embedding generation failed or was interrupted.');
+      process.exit(1);
+    }
+    
+    // Close database connection
+    await closeDatabase();
+    
+    console.log('=== Data import and embedding generation completed successfully ===');
     process.exit(0);
-  } else {
-    console.error('Embedding generation failed or was interrupted.');
+  } catch (error) {
+    console.error('Unexpected error during process:', error);
+    await closeDatabase();
     process.exit(1);
   }
 })(); 
