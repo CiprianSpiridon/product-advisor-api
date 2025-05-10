@@ -15,9 +15,34 @@ import fs from 'fs'; // For reading the prompt config file
 // Load environment variables
 dotenv.config({ path: path.join(path.dirname(fileURLToPath(import.meta.url)), './.env') });
 
+// Load configurations
+let appConfig, promptConfig;
+
+try {
+  // Load app configuration
+  const appConfigPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'config/app.json');
+  const appConfigContent = fs.readFileSync(appConfigPath, 'utf8');
+  appConfig = JSON.parse(appConfigContent);
+  console.log("App configuration loaded from config/app.json");
+  
+  // Load prompt configuration
+  const promptConfigPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'config/prompts.json');
+  const promptConfigContent = fs.readFileSync(promptConfigPath, 'utf8');
+  promptConfig = JSON.parse(promptConfigContent);
+  console.log("Prompt configuration loaded from config/prompts.json");
+} catch (error) {
+  console.error("Error loading configuration:", error.message);
+  process.exit(1);
+}
+
 // Configuration
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || appConfig.server.port;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const SEARCH_RESULT_COUNT = parseInt(process.env.SEARCH_RESULT_COUNT || appConfig.rag.searchResultCount, 10);
+const TEMPERATURE = parseFloat(process.env.TEMPERATURE || appConfig.rag.temperature);
+const EMBEDDING_BATCH_SIZE = parseInt(process.env.EMBEDDING_BATCH_SIZE || appConfig.rag.embeddingBatchSize, 10);
+const VECTOR_DB_PATH = appConfig.vectorDb.path;
+
 if (!OPENAI_API_KEY) {
   console.error('Error: OPENAI_API_KEY is required');
   process.exit(1);
@@ -35,7 +60,6 @@ const dbPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'vectordb
 
 // Initialize RAG system
 let ragApplication = null;
-let promptConfig;
 
 // --- Short-term conversation history (simple in-memory store for demo) ---
 const conversationHistories = {}; // { userId: ["User: Hi", "Bot: Hello!"] }
@@ -46,15 +70,19 @@ async function initRAG() {
   
   try {
     // Create the RAG application with embedJs
+    const dbPath = path.join(path.dirname(fileURLToPath(import.meta.url)), VECTOR_DB_PATH);
+    
+    console.log(`Configuring RAG with: Search Results: ${SEARCH_RESULT_COUNT}, Temperature: ${TEMPERATURE}, Embedding Batch Size: ${EMBEDDING_BATCH_SIZE}`);
+
     ragApplication = await new RAGApplicationBuilder()
       .setEmbeddingModel(new OpenAiEmbeddings({
         apiKey: process.env.OPENAI_API_KEY, 
-        batchSize: 256 
+        batchSize: EMBEDDING_BATCH_SIZE 
       }))
       .setModel(SIMPLE_MODELS.OPENAI_GPT4_O)
       .setVectorDatabase(new LanceDb({ path: dbPath }))
-      .setTemperature(0.2)
-      .setSearchResultCount(7)
+      .setTemperature(TEMPERATURE)
+      .setSearchResultCount(SEARCH_RESULT_COUNT)
       .build();
     
     // Skip the CSV loading step as embeddings should be pre-generated
@@ -180,6 +208,14 @@ app.post('/ask', async (req, res) => {
                 console.warn("/ask: An item in relatedProducts has an invalid structure. Item:", item, "LLM Raw:", llmOutputString);
                 throw new Error("An item in relatedProducts does not have the required {sku: string, name: string, description: string} structure.");
             }
+            
+            // Ensure all expected fields exist (add missing ones as empty strings)
+            const expectedFields = ['brand_default_store', 'features', 'recom_age', 'top_category', 'secondary_category'];
+            for (const field of expectedFields) {
+                if (typeof item[field] !== 'string') {
+                    item[field] = '';
+                }
+            }
         }
     } catch (e) {
         console.error("/ask: Failed to parse LLM response as JSON or structure was invalid:", e.message);
@@ -222,30 +258,21 @@ app.post('/ask', async (req, res) => {
 // ========================================================================
 
 async function initializeApp() {
-    // 1. Load Prompt Configuration
+    // Initialize RAG Application (adapt to your actual setup)
     try {
-        const configPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'prompt_config.json');
-        const configFileContent = fs.readFileSync(configPath, 'utf8');
-        promptConfig = JSON.parse(configFileContent);
-        console.log("Prompt configuration loaded successfully.");
-    } catch (error) {
-        console.error("FATAL ERROR: Could not load or parse prompt_config.json. Exiting.", error);
-        process.exit(1);
-    }
-
-    // 2. Initialize RAG Application (adapt to your actual setup)
-    try {
-        const dbPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'vectordb');
+        const dbPath = path.join(path.dirname(fileURLToPath(import.meta.url)), VECTOR_DB_PATH);
+        
+        console.log(`Configuring RAG with: Search Results: ${SEARCH_RESULT_COUNT}, Temperature: ${TEMPERATURE}, Embedding Batch Size: ${EMBEDDING_BATCH_SIZE}`);
 
         ragApplication = await new RAGApplicationBuilder()
             .setEmbeddingModel(new OpenAiEmbeddings({
                 apiKey: process.env.OPENAI_API_KEY, 
-                batchSize: 256 
+                batchSize: EMBEDDING_BATCH_SIZE 
             }))
-            .setModel(SIMPLE_MODELS.OPENAI_GPT4_O)
+            .setModel(SIMPLE_MODELS.OPENAI_GPT4_O) // Use the model directly without trying to set apiKey on it
             .setVectorDatabase(new LanceDb({ path: dbPath }))
-            .setTemperature(0.2)
-            .setSearchResultCount(7)
+            .setTemperature(TEMPERATURE)
+            .setSearchResultCount(SEARCH_RESULT_COUNT)
             .build();
         console.log("RAG Application initialized successfully.");
     } catch (error) {
@@ -379,6 +406,14 @@ app.post('/chat', async (req, res) => {
                     typeof item.description !== 'string') {
                     console.warn("An item in relatedProducts has an invalid structure. Item:", item, "LLM Raw:", llmOutputString);
                     throw new Error("An item in relatedProducts does not have the required {sku: string, name: string, description: string} structure.");
+                }
+                
+                // Ensure all expected fields exist (add missing ones as empty strings)
+                const expectedFields = ['brand_default_store', 'features', 'recom_age', 'top_category', 'secondary_category'];
+                for (const field of expectedFields) {
+                    if (typeof item[field] !== 'string') {
+                        item[field] = '';
+                    }
                 }
             }
         } catch (e) {

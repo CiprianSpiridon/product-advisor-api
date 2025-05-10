@@ -1,0 +1,22 @@
+{
+  "server": {
+    "port": 3002
+  },
+  "openai": {
+    "embeddingModel": "text-embedding-3-small",
+    "completionModel": "gpt-4o"
+  },
+  "rag": {
+    "searchResultCount": 15,
+    "temperature": 0.2,
+    "embeddingBatchSize": 256
+  },
+  "vectorDb": {
+    "type": "lancedb",
+    "path": "vectordb",
+    "collectionName": "products"
+  },
+  "dataLoader": {
+    "csvPath": "../data/products.csv"
+  }
+} 

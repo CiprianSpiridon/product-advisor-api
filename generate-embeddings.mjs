@@ -10,8 +10,20 @@ import { fileURLToPath } from 'url';
 import fs from 'fs';
 import { parse } from 'csv-parse/sync';
 
-// Load environment variables
+// Load environment variables and configuration
 dotenv.config({ path: path.join(path.dirname(fileURLToPath(import.meta.url)), './.env') });
+
+// Load app configuration
+let appConfig;
+try {
+  const appConfigPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'config/app.json');
+  const appConfigContent = fs.readFileSync(appConfigPath, 'utf8');
+  appConfig = JSON.parse(appConfigContent);
+  console.log("App configuration loaded from config/app.json");
+} catch (error) {
+  console.error("Error loading app configuration:", error.message);
+  process.exit(1);
+}
 
 // Configuration
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -20,9 +32,14 @@ if (!OPENAI_API_KEY) {
   process.exit(1);
 }
 
+// Apply configuration
+const SEARCH_RESULT_COUNT = parseInt(process.env.SEARCH_RESULT_COUNT || appConfig.rag.searchResultCount, 10);
+const TEMPERATURE = parseFloat(process.env.TEMPERATURE || appConfig.rag.temperature);
+const EMBEDDING_BATCH_SIZE = parseInt(process.env.EMBEDDING_BATCH_SIZE || appConfig.rag.embeddingBatchSize, 10);
+
 // Path configuration
-const csvPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '../data/products.csv');
-const dbPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'vectordb');
+const csvPath = path.join(path.dirname(fileURLToPath(import.meta.url)), appConfig.dataLoader.csvPath);
+const dbPath = path.join(path.dirname(fileURLToPath(import.meta.url)), appConfig.vectorDb.path);
 const tempDir = path.join(path.dirname(fileURLToPath(import.meta.url)), 'temp_data');
 const PROGRESS_FILE_PATH = path.join(tempDir, 'embedding_progress.json');
 
@@ -63,11 +80,11 @@ async function generateEmbeddings() {
     }
 
     const ragApplication = await new RAGApplicationBuilder()
-      .setEmbeddingModel(new OpenAiEmbeddings({ batchSize: 256 }))
+      .setEmbeddingModel(new OpenAiEmbeddings({ batchSize: EMBEDDING_BATCH_SIZE }))
       .setModel(SIMPLE_MODELS.OPENAI_GPT4_O)
       .setVectorDatabase(new LanceDb({ path: dbPath }))
-      .setTemperature(0.2)
-      .setSearchResultCount(5)
+      .setTemperature(TEMPERATURE)
+      .setSearchResultCount(SEARCH_RESULT_COUNT)
       .build();
 
     console.log('Reading CSV file...');
