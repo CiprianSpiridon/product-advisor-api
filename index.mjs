@@ -11,6 +11,7 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs'; // For reading the prompt config file
+import { networkInterfaces } from 'os'; // Import networkInterfaces from os
 
 // Load environment variables
 dotenv.config({ path: path.join(path.dirname(fileURLToPath(import.meta.url)), './.env') });
@@ -452,9 +453,43 @@ app.post('/chat', async (req, res) => {
 // START SERVER
 // ========================================================================
 
+// Function to get all network IP addresses
+function getNetworkIPs() {
+  const nets = networkInterfaces();
+  const results = {};
+
+  for (const name of Object.keys(nets)) {
+    for (const net of nets[name]) {
+      // Skip over non-IPv4 and internal (loopback) addresses
+      if (net.family === 'IPv4' && !net.internal) {
+        if (!results[name]) {
+          results[name] = [];
+        }
+        results[name].push(net.address);
+      }
+    }
+  }
+  return results;
+}
+
 initializeApp().then(() => {
-    app.listen(PORT, () => {
+    // Start server, listening on all network interfaces (0.0.0.0)
+    app.listen(PORT, '0.0.0.0', () => {
         console.log(`Server running on port ${PORT}. RAG App and Prompts Initialized.`);
+        console.log(`Local URL: http://localhost:${PORT}`);
+        
+        // Display all network IPs
+        const networkIPs = getNetworkIPs();
+        if (Object.keys(networkIPs).length > 0) {
+            console.log('Network URLs:');
+            for (const [interfaceName, addresses] of Object.entries(networkIPs)) {
+                for (const ip of addresses) {
+                    console.log(`  http://${ip}:${PORT} (${interfaceName})`);
+                }
+            }
+        } else {
+            console.log('No network interfaces detected.');
+        }
     });
 }).catch(initializationError => {
     console.error("Application failed to initialize:", initializationError);
