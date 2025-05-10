@@ -5,18 +5,20 @@ A Retrieval-Augmented Generation (RAG) API for e-commerce product queries using 
 ## Features
 
 - Natural language querying for product information
-- OpenAI GPT-4 for answering queries
+- OpenAI GPT-4o for generating answers with related products
 - Vector embedding with OpenAI's text-embedding-3-small
 - Vector storage with LanceDB
-- Support for switching between OpenAI and Ollama
-- Express.js API with health check and query endpoint
-- Configurable through a single config file
+- User and children metadata support for personalized recommendations
+- Conversation history tracking
+- Network discovery (shows all available IP addresses at startup)
+- Bold product names with markdown formatting
+- Comprehensive product details in recommendations
+- JSON configuration files for easy customization
 
 ## Requirements
 
 - Node.js 18+
-- OpenAI API key (if using OpenAI)
-- Ollama running locally (if using Ollama)
+- OpenAI API key
 
 ## Setup
 
@@ -26,22 +28,25 @@ A Retrieval-Augmented Generation (RAG) API for e-commerce product queries using 
    # Required for OpenAI
    OPENAI_API_KEY=your_api_key_here
    
-   # Optional: Switch to ollama (default is 'openai')
-   # PROVIDER_TYPE=ollama
+   # Optional: Custom port (default is 3002)
+   PORT=3002
    
-   # Optional: Custom Ollama URL (default is http://localhost:11434)
-   # OLLAMA_BASE_URL=http://localhost:11434
-   
-   # Optional: Custom port (default is 3000)
-   # PORT=3000
+   # Optional: RAG configuration 
+   # SEARCH_RESULT_COUNT=15
+   # TEMPERATURE=0.2
+   # EMBEDDING_BATCH_SIZE=256
    ```
 3. Install dependencies:
    ```
    cd product-assitant-api
    npm install
    ```
-4. Prepare your products.csv file (sample already included)
-5. Start the server:
+4. Prepare your products.csv file in the `data/` directory
+5. Generate embeddings:
+   ```
+   npm run generate-embeddings
+   ```
+6. Start the server:
    ```
    npm start
    ```
@@ -52,15 +57,50 @@ A Retrieval-Augmented Generation (RAG) API for e-commerce product queries using 
 
 ## Configuration
 
-The system is configured through `config.js`. The main configuration options are:
+The system is configured through JSON files in the `config/` directory:
 
-- `provider.type`: 'openai' or 'ollama'
-- `provider.openai`: OpenAI-specific settings
-- `provider.ollama`: Ollama-specific settings
-- `vectorDb`: Vector database settings
-- `search.topK`: Number of similar products to retrieve (default: 5)
+### `config/app.json`
+Contains general application settings:
+```json
+{
+  "server": {
+    "port": 3002
+  },
+  "openai": {
+    "embeddingModel": "text-embedding-3-small",
+    "completionModel": "gpt-4o"
+  },
+  "rag": {
+    "searchResultCount": 15,
+    "temperature": 0.2,
+    "embeddingBatchSize": 256
+  },
+  "vectorDb": {
+    "type": "lancedb",
+    "path": "vectordb",
+    "collectionName": "products"
+  },
+  "dataLoader": {
+    "csvPath": "../data/products.csv"
+  }
+}
+```
 
-## API Usage
+### `config/prompts.json`
+Contains the prompt templates and instructions for the LLM:
+```json
+{
+  "jsonOutputInstructions": {
+    "systemPreamble": "...",
+    "answerFieldDetails": "...",
+    "relatedProductsFieldDetails": "...",
+    "closingInstruction": "..."
+  },
+  "summarizationInstruction": "..."
+}
+```
+
+## API Endpoints
 
 ### Health Check
 ```
@@ -71,7 +111,6 @@ Response:
 ```json
 {
   "status": "ok",
-  "provider": "openai",
   "timestamp": "2023-06-15T12:34:56.789Z"
 }
 ```
@@ -82,25 +121,65 @@ POST /ask
 Content-Type: application/json
 
 {
-  "question": "What baby gear products do you have?"
+  "query": "What baby gear products do you have for a 2-year-old?",
+  "user": {
+    "id": "user_12345",
+    "name": "Jane Smith",
+    "children": [
+      {
+        "name": "Emma",
+        "age": 2,
+        "gender": "female",
+        "birthday": "2022-03-15"
+      }
+    ]
+  }
 }
 ```
 
 Response:
 ```json
 {
-  "answer": "Based on the provided information, we have a product called 'Stroller A' in the Baby Gear category. It's a lightweight stroller with twin seats that features adjustable recline and a sun canopy. It's priced at 999.",
+  "answer": "For your 2-year-old daughter Emma, I recommend the **Toddler Travel Stroller**. It's lightweight yet sturdy with adjustable reclining positions, perfect for toddlers her age.",
   "relatedProducts": [
     {
-      "id": "product-123abc",
-      "title": "Stroller A",
-      "price": "999",
-      "category": "Baby Gear",
-      "score": 0.92
-    }
+      "sku": "stroller-123",
+      "name": "Toddler Travel Stroller",
+      "brand_default_store": "KidComfort",
+      "description": "Lightweight stroller with adjustable positions",
+      "features": "One-hand folding, rain cover included",
+      "recom_age": "1-4 years",
+      "top_category": "Baby Gear",
+      "secondary_category": "Strollers"
+    },
+    ...more products...
   ]
 }
 ```
+
+### Chat Conversation
+```
+POST /chat
+Content-Type: application/json
+
+{
+  "query": "I need something for my daughter's naptime",
+  "user": {
+    "id": "user_12345",
+    "name": "Jane Smith",
+    "children": [
+      {
+        "name": "Emma",
+        "age": 2,
+        "gender": "female",
+        "birthday": "2022-03-15"
+      }
+    ]
+  }
+}
+```
+
+Response format is the same as `/ask`, but the endpoint maintains conversation history for follow-up questions.
 
 ## Testing the API
 
@@ -114,22 +193,10 @@ npm run test:api
 npm run test:api -- "Do you have any baby strollers?"
 ```
 
-Or directly:
-
-```bash
-node test.mjs "What baby products do you have?"
-```
-
-## Switching to Ollama
-
-To use Ollama instead of OpenAI:
-
-1. Make sure Ollama is installed and running locally
-2. Set `PROVIDER_TYPE=ollama` in your `.env` file
-3. Restart the server
-
 ## Extending the System
 
-- Add more vector databases by implementing other providers from `embedjs`
+- Add authentication for API endpoints
 - Implement caching with Redis for faster responses
-- Add authentication for the API endpoints 
+- Add a web interface for easy querying
+- Implement personalized recommendations based on user history
+- Add support for multiple languages 
