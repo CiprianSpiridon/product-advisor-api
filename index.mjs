@@ -104,15 +104,18 @@ app.get('/health', (req, res) => {
 });
 
 app.post('/ask', async (req, res) => {
-  // const { question } = req.body; // Old way
-  const userQuery = req.body.question; // Assuming 'question' is the key from your cURL
-  const userId = await getUserId(req); // Use existing getUserId, pass req to it
+  // Accept both 'query' and 'question' for backward compatibility
+  const userQuery = req.body.query || req.body.question;
+  const user = req.body.user || {};
+  const userId = user.id || req.body.userId || req.query.userId || 'default_user';
+  const userName = user.name || '';
+  const children = user.children || [];
 
   if (!userQuery) {
-    return res.status(400).json({ answer: "Question is required", relatedProducts: [] });
+    return res.status(400).json({ answer: "Query is required.", relatedProducts: [] });
   }
 
-  if (!ragApplication || !promptConfig) { // Ensure promptConfig is also checked
+  if (!ragApplication || !promptConfig) {
     return res.status(503).json({
       answer: "RAG system or prompt configuration not initialized yet",
       relatedProducts: []
@@ -129,6 +132,19 @@ app.post('/ask', async (req, res) => {
   
   let promptForRAG = `${systemPreamble}\n\n${answerFieldDetails}\n\n${relatedProductsFieldDetails}\n\n`;
 
+  // Inject user metadata
+  if (userName || (children && children.length > 0)) {
+    promptForRAG += `User profile:\n`;
+    if (userName) promptForRAG += `- Name: ${userName}\n`;
+    if (children.length > 0) {
+      promptForRAG += `- Children:\n`;
+      for (const child of children) {
+        promptForRAG += `  - Name: ${child.name || ''}, Age: ${child.age || ''}, Gender: ${child.gender || ''}, Birthday: ${child.birthday || ''}\n`;
+      }
+    }
+    promptForRAG += '\n';
+  }
+
   if (longTermMemoryContext) {
       promptForRAG += `Relevant past information for ${userId}:\n${longTermMemoryContext}\n\n`;
   }
@@ -140,35 +156,23 @@ app.post('/ask', async (req, res) => {
 
   promptForRAG += `User's current query: ${userQuery}\n\n${closingInstruction}`;
 
+  // Log the prompt sent to the model
+  console.log("--- Prompt sent to LLM (/ask): ---");
+  console.log(promptForRAG);
+  console.log("-----------------------------------");
+
   console.log(`Processing augmented query for user ${userId} in /ask endpoint...`);
   // console.log("Prompt for RAG (/ask):", promptForRAG); // For debugging
 
   try {
     const result = await ragApplication.query(promptForRAG);
     // Log the complete result object for debugging
-    console.log("--- Complete RAG result object: ---");
+    console.log("--- Complete RAG result object (/ask): ---");
     console.log(JSON.stringify(result, null, 2));
     console.log("----------------------------------");
     
-    // Handle different possible response structures
-    let llmOutputString;
-    if (result && typeof result === 'object') {
-      if (result.answer !== undefined) {
-        llmOutputString = result.answer;
-      } else if (result.content !== undefined) {
-        llmOutputString = result.content;
-      } else if (result.text !== undefined) {
-        llmOutputString = result.text;
-      } else if (result.response !== undefined) {
-        llmOutputString = result.response;
-      } else {
-        // Try to use the entire result object as the response if it's a string
-        llmOutputString = typeof result === 'string' ? result : JSON.stringify(result);
-      }
-    } else {
-      // Fallback if result is not an object
-      llmOutputString = result;
-    }
+    // Extract the LLM output from the result object
+    let llmOutputString = result.answer || result.content || result.text || result.response || '';
 
     // Log the direct output from the LLM for debugging
     console.log("--- /ask endpoint: LLM Raw Output (extracted) ---");
@@ -227,12 +231,10 @@ app.post('/ask', async (req, res) => {
         };
     }
 
-    // Update short-term history
-    conversationHistories[userId].push(`User: ${userQuery}`);
-    conversationHistories[userId].push(`Bot: ${botResponseJson.answer}`);
-
-    if (conversationHistories[userId].length > 20) { // Manage history size
-        conversationHistories[userId] = conversationHistories[userId].slice(-20);
+    // Update short-term history ONLY if the answer is valid
+    if (botResponseJson && typeof botResponseJson.answer === 'string' && botResponseJson.answer.trim() !== '' && botResponseJson.answer.indexOf('I had a little trouble formatting my response') === -1) {
+        conversationHistories[userId].push(`User: ${userQuery}`);
+        conversationHistories[userId].push(`Bot: ${botResponseJson.answer}`);
     }
 
     // Trigger summarization (example logic)
@@ -343,8 +345,11 @@ app.post('/chat', async (req, res) => {
         });
     }
 
-    const userId = await getUserId(req);
-    const userQuery = req.body.query;
+    const userQuery = req.body.query || req.body.question;
+    const user = req.body.user || {};
+    const userId = user.id || req.body.userId || req.query.userId || 'default_user';
+    const userName = user.name || '';
+    const children = user.children || [];
 
     if (!userQuery) {
         return res.status(400).json({ answer: "Query is required.", relatedProducts: [] });
@@ -359,6 +364,19 @@ app.post('/chat', async (req, res) => {
     
     let promptForRAG = `${systemPreamble}\n\n${answerFieldDetails}\n\n${relatedProductsFieldDetails}\n\n`;
 
+    // Inject user metadata
+    if (userName || (children && children.length > 0)) {
+      promptForRAG += `User profile:\n`;
+      if (userName) promptForRAG += `- Name: ${userName}\n`;
+      if (children.length > 0) {
+        promptForRAG += `- Children:\n`;
+        for (const child of children) {
+          promptForRAG += `  - Name: ${child.name || ''}, Age: ${child.age || ''}, Gender: ${child.gender || ''}, Birthday: ${child.birthday || ''}\n`;
+        }
+      }
+      promptForRAG += '\n';
+    }
+
     if (longTermMemoryContext) {
         promptForRAG += `Relevant past information for ${userId}:\n${longTermMemoryContext}\n\n`;
     }
@@ -370,16 +388,33 @@ app.post('/chat', async (req, res) => {
 
     promptForRAG += `User's current query: ${userQuery}\n\n${closingInstruction}`;
 
-    // console.log(`\n--- Querying RAG for user ${userId} with structured JSON output instruction ---`);
-    // console.log("Prompt for RAG:\n", promptForRAG); // Debugging: can be very long
+    // Log the prompt sent to the model
+    console.log("--- Prompt sent to LLM (/chat): ---");
+    console.log(promptForRAG);
+    console.log("-----------------------------------");
 
     try {
         const result = await ragApplication.query(promptForRAG);
-        let llmOutputString = result.answer;
-        let botResponseJson;
+        // Log the complete result object for debugging
+        console.log("--- Complete RAG result object (/chat): ---");
+        console.log(JSON.stringify(result, null, 2));
+        console.log("----------------------------------");
+        
+        // Extract the LLM output from the result object
+        let llmOutputString = result.answer || result.content || result.text || result.response || '';
 
+        // Log the direct output from the LLM for debugging
+        console.log("--- /chat endpoint: LLM Raw Output (extracted) ---");
+        console.log(llmOutputString);
+        console.log("---------------------------------------------------");
+
+        let botResponseJson;
+        
         try {
-            botResponseJson = JSON.parse(llmOutputString);
+            if (typeof llmOutputString !== 'string' || llmOutputString.trim() === "") {
+                console.error("/chat: LLM output is not a non-empty string. Value:", llmOutputString);
+                throw new Error("LLM output is not a non-empty string, cannot parse.");
+            }
             
             // Clean the output string if it contains markdown code fences
             let cleanedOutput = llmOutputString;
@@ -395,7 +430,7 @@ app.post('/chat', async (req, res) => {
 
             // Validate the structure: answer (string) and relatedProducts (array of objects)
             if (typeof botResponseJson.answer !== 'string' || !Array.isArray(botResponseJson.relatedProducts)) {
-                console.warn("LLM output was valid JSON but not the expected top-level structure. LLM Raw:", llmOutputString);
+                console.warn("/chat: LLM output was valid JSON but not the expected top-level structure. LLM Raw:", llmOutputString);
                 throw new Error("LLM output is not in the expected {answer: string, relatedProducts: array} format.");
             }
 
@@ -405,7 +440,7 @@ app.post('/chat', async (req, res) => {
                     typeof item.sku !== 'string' ||
                     typeof item.name !== 'string' ||
                     typeof item.description !== 'string') {
-                    console.warn("An item in relatedProducts has an invalid structure. Item:", item, "LLM Raw:", llmOutputString);
+                    console.warn("/chat: An item in relatedProducts has an invalid structure. Item:", item, "LLM Raw:", llmOutputString);
                     throw new Error("An item in relatedProducts does not have the required {sku: string, name: string, description: string} structure.");
                 }
                 
@@ -418,28 +453,31 @@ app.post('/chat', async (req, res) => {
                 }
             }
         } catch (e) {
-            console.error("Failed to parse LLM response as JSON or structure was invalid:", e.message);
-            console.error("LLM raw output:", llmOutputString);
+            console.error("/chat: Failed to parse LLM response as JSON or structure was invalid:", e.message);
+            console.error("/chat: LLM raw output:", llmOutputString);
             botResponseJson = { // Fallback
                 answer: "I had a little trouble formatting my response perfectly with all details. Here's the main information: " + llmOutputString,
                 relatedProducts: []
             };
         }
 
-        conversationHistories[userId].push(`User: ${userQuery}`);
-        conversationHistories[userId].push(`Bot: ${botResponseJson.answer}`);
+        // Update short-term history ONLY if the answer is valid
+        if (botResponseJson && typeof botResponseJson.answer === 'string' && botResponseJson.answer.trim() !== '' && botResponseJson.answer.indexOf('I had a little trouble formatting my response') === -1) {
+            conversationHistories[userId].push(`User: ${userQuery}`);
+            conversationHistories[userId].push(`Bot: ${botResponseJson.answer}`);
+        }
 
         if (conversationHistories[userId].length > 20) {
             conversationHistories[userId] = conversationHistories[userId].slice(-20);
         }
 
+        // Trigger summarization if needed
         if (conversationHistories[userId].length % 10 === 0 && conversationHistories[userId].length >= 10) {
             const summary = await summarizeConversation(userId, conversationHistories[userId].join("\n"));
             await storeMemory(userId, summary);
         }
 
         res.json(botResponseJson);
-
     } catch (error) {
         console.error("Error during RAG query for structured output:", error);
         res.status(500).json({
