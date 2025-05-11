@@ -16,4 +16,4 @@ EXPOSE 3000
 
 # Define the command to run the app (assuming index.mjs is the main server)
 # CMD ["node", "index.mjs"] 
-CMD ["node", "index.mjs"] 
+CMD ["node", "src/index.js"] 
