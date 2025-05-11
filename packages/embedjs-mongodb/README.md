@@ -6,3 +6,13 @@
 </p>
 
 This package extends and offers additional functionality to [embedJs](https://www.npmjs.com/package/@llm-tools/embedjs). Refer to the documentation there for more details.
+
+## Collection Usage
+
+MongoDB collections are used as follows:
+
+- **rag_cache** - Stores loader metadata information only (via `metadataCollection`)
+- **customData** - Stores both user memories and cache data, using `loaderId` and `key` as identifiers (via `customDataCollection`)
+- **conversations** - Stores conversation history (via `conversationCollection`)
+
+When using `loaderCustomGet()`, always provide both the key and loaderId parameters to properly retrieve cached items.
