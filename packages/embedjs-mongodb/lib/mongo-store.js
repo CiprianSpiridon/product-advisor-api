@@ -63,8 +63,10 @@ export class MongoStore {
     }
     async getLoaderMetadata(loaderId) {
         const result = await this.metadataCollection.findOne({ loaderId });
-        delete result.loaderId;
-        delete result._id;
+        if (result) { // Add this check
+            delete result.loaderId;
+            delete result._id;
+        }
         return result;
     }
     async hasLoaderMetadata(loaderId) {
@@ -83,9 +85,11 @@ export class MongoStore {
     }
     async loaderCustomGet(key) {
         const result = await this.customDataCollection.findOne({ key });
-        delete result.loaderId;
-        delete result.key;
-        delete result._id;
+        if (result) {
+            delete result.loaderId;
+            delete result.key;
+            delete result._id;
+        }
         return result;
     }
     async loaderCustomHas(key) {
@@ -103,6 +107,9 @@ export class MongoStore {
     }
     async getConversation(conversationId) {
         const document = await this.conversationCollection.findOne({ conversationId });
+        if (!document) {
+            return { conversationId, entries: [] };
+        }
         return {
             conversationId: document.conversationId,
             entries: document.entries,

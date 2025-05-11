@@ -79,8 +79,10 @@ export class MongoStore implements BaseStore {
 
     async getLoaderMetadata(loaderId: string): Promise<LoaderListEntry> {
         const result = await this.metadataCollection.findOne({ loaderId });
-        delete result.loaderId;
-        delete result._id;
+        if (result) { // Add this check
+            delete result.loaderId;
+            delete result._id;
+        }
         return result;
     }
 
@@ -108,9 +110,11 @@ export class MongoStore implements BaseStore {
 
     async loaderCustomGet<T extends Record<string, unknown>>(key: string): Promise<T> {
         const result = await this.customDataCollection.findOne({ key });
-        delete result.loaderId;
-        delete result.key;
-        delete result._id;
+        if (result) {
+            delete result.loaderId;
+            delete result.key;
+            delete result._id;
+        }
         return <T>result;
     }
 
@@ -133,7 +137,9 @@ export class MongoStore implements BaseStore {
 
     async getConversation(conversationId: string): Promise<Conversation> {
         const document = await this.conversationCollection.findOne({ conversationId });
-
+        if (!document) {
+            return { conversationId, entries: [] };
+        }
         return {
             conversationId: document.conversationId,
             entries: document.entries as Message[],
