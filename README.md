@@ -1,108 +1,105 @@
-# Product Assistant RAG API
+# Product Assistant API
 
-A Retrieval-Augmented Generation (RAG) API for e-commerce product queries using the `@llm-tools/embedjs` framework.
+A RAG-based (Retrieval-Augmented Generation) product recommendation API that leverages OpenAI's models, vector embeddings, and product data to provide personalized product recommendations and answer product-related questions.
 
 ## Features
 
-- Natural language querying for product information
-- OpenAI GPT-4o for generating answers with related products
-- Vector embedding with OpenAI's text-embedding-3-small
-- Vector storage with LanceDB
-- User and children metadata support for personalized recommendations
-- Conversation history tracking
-- Network discovery (shows all available IP addresses at startup)
-- Bold product names with markdown formatting
-- Comprehensive product details in recommendations
-- JSON configuration files for easy customization
+- **Conversational Product Assistant**: Answer questions about products and provide relevant product recommendations
+- **Personalization**: Incorporate user profile and children information into responses
+- **Memory**: Maintain conversation history and periodically summarize for long-term context
+- **Caching**: Store and retrieve previous responses to improve performance
+- **Vector Search**: Utilize embeddings for semantic product search using Qdrant
+- **MongoDB Storage**: Persist conversations, memory, and cache data
 
-## Requirements
+## Architecture
+
+The application follows a modular architecture separating concerns:
+
+```
+product-assitant-api/
+├── config/                # Configuration files (app.json, prompts.json)
+├── docker/                # Docker-related files
+│   ├── app/               # Application Dockerfile
+│   └── data/              # Data persistence (MongoDB, Qdrant)
+├── input_data/            # Source data for embeddings
+├── packages/              # Local dependencies
+│   └── embedjs-mongodb/   # MongoDB integration for embedjs
+├── src/                   # Application source code (refactored)
+│   ├── config/            # Configuration loading and management
+│   ├── controllers/       # Request handlers
+│   ├── middleware/        # Express middleware
+│   ├── routes/            # API route definitions
+│   ├── services/          # Business logic and service layer
+│   └── utils/             # Utility functions
+├── db.mjs                 # Database connection and product retrieval
+├── generate-embeddings.mjs # Script to generate vector embeddings
+├── index.mjs              # Legacy entry point
+└── docker-compose.yml     # Docker services configuration
+```
+
+### Key Components
+
+- **Config Service**: Centralizes loading of environment variables and JSON configuration
+- **RAG Service**: Manages RAG application setup, vector database connections, and LLM queries
+- **Cache Service**: Handles caching of query responses
+- **Memory Service**: Manages conversation history and long-term memory
+- **Chat Controller**: Processes user queries and orchestrates the services
+
+## Setup and Installation
+
+### Prerequisites
 
 - Node.js 18+
+- Docker and Docker Compose (for containerized deployment)
 - OpenAI API key
+- MongoDB
+- Qdrant vector database
 
-## Setup
+### Environment Setup
 
 1. Clone the repository
-2. Create a `.env` file in the root directory:
+2. Copy `example.env` to `.env` and fill in the required values:
    ```
-   # Required for OpenAI
-   OPENAI_API_KEY=your_api_key_here
-   
-   # Optional: Custom port (default is 3002)
-   PORT=3002
-   
-   # Optional: RAG configuration 
-   # SEARCH_RESULT_COUNT=15
-   # TEMPERATURE=0.2
-   # EMBEDDING_BATCH_SIZE=256
+   cp example.env .env
    ```
 3. Install dependencies:
    ```
-   cd product-assitant-api
    npm install
    ```
-4. Prepare your products.csv file in the `data/` directory
-5. Generate embeddings:
-   ```
-   npm run generate-embeddings
-   ```
-6. Start the server:
-   ```
-   npm start
-   ```
-   Or for development with auto-reload:
-   ```
-   npm run dev
-   ```
 
-## Configuration
+### Running the Application
 
-The system is configured through JSON files in the `config/` directory:
+#### Development Mode
 
-### `config/app.json`
-Contains general application settings:
-```json
-{
-  "server": {
-    "port": 3002
-  },
-  "openai": {
-    "embeddingModel": "text-embedding-3-small",
-    "completionModel": "gpt-4o"
-  },
-  "rag": {
-    "searchResultCount": 15,
-    "temperature": 0.2,
-    "embeddingBatchSize": 256
-  },
-  "vectorDb": {
-    "type": "lancedb",
-    "path": "vectordb",
-    "collectionName": "products"
-  },
-  "dataLoader": {
-    "csvPath": "../data/products.csv"
-  }
-}
+```bash
+# Generate embeddings (first time only)
+npm run generate-embeddings
+
+# Start the server in development mode with auto-reload
+npm run dev:new
 ```
 
-### `config/prompts.json`
-Contains the prompt templates and instructions for the LLM:
-```json
-{
-  "jsonOutputInstructions": {
-    "systemPreamble": "...",
-    "answerFieldDetails": "...",
-    "relatedProductsFieldDetails": "...",
-    "closingInstruction": "..."
-  },
-  "summarizationInstruction": "..."
-}
+#### Production Mode
+
+```bash
+# Start the server in production mode
+npm run start:new
+```
+
+#### Docker Deployment
+
+```bash
+# Build and start all services with Docker Compose
+docker-compose up -d
+
+# View logs
+docker-compose logs -f app
 ```
 
 ## API Endpoints
 
 ### Health Check
+
 ```
 GET /health
 ```
@@ -111,26 +108,29 @@ Response:
 ```json
 {
   "status": "ok",
-  "timestamp": "2023-06-15T12:34:56.789Z"
+  "timestamp": "2023-05-01T12:00:00.000Z"
 }
 ```
 
-### Ask a Question
-```
-POST /ask
-Content-Type: application/json
+### Chat API
 
+```
+POST /chat
+POST /ask
+```
+
+Request Body:
+```json
 {
-  "query": "What baby gear products do you have for a 2-year-old?",
+  "query": "Can you recommend baby strollers?",
+  "userId": "user123",
   "user": {
-    "id": "user_12345",
-    "name": "Jane Smith",
+    "name": "John Doe",
     "children": [
       {
-        "name": "Emma",
-        "age": 2,
-        "gender": "female",
-        "birthday": "2022-03-15"
+        "name": "Jane",
+        "age": "2",
+        "gender": "female"
       }
     ]
   }
@@ -140,63 +140,72 @@ Content-Type: application/json
 Response:
 ```json
 {
-  "answer": "For your 2-year-old daughter Emma, I recommend the **Toddler Travel Stroller**. It's lightweight yet sturdy with adjustable reclining positions, perfect for toddlers her age.",
+  "answer": "Based on your needs with a 2-year-old daughter, I'd recommend...",
   "relatedProducts": [
     {
-      "sku": "stroller-123",
-      "name": "Toddler Travel Stroller",
-      "brand_default_store": "KidComfort",
-      "description": "Lightweight stroller with adjustable positions",
-      "features": "One-hand folding, rain cover included",
-      "recom_age": "1-4 years",
-      "top_category": "Baby Gear",
-      "secondary_category": "Strollers"
-    },
-    ...more products...
+      "sku": "ST-102",
+      "name": "Lightweight Travel Stroller",
+      "price": 199.99,
+      "category": "Baby",
+      "description": "..."
+    }
   ]
 }
 ```
 
-### Chat Conversation
-```
-POST /chat
-Content-Type: application/json
+## Data Flow
 
-{
-  "query": "I need something for my daughter's naptime",
-  "user": {
-    "id": "user_12345",
-    "name": "Jane Smith",
-    "children": [
-      {
-        "name": "Emma",
-        "age": 2,
-        "gender": "female",
-        "birthday": "2022-03-15"
-      }
-    ]
-  }
-}
-```
+1. User sends a query to the API
+2. System checks cache for existing response
+3. If not cached, the query is processed:
+   - User's conversation history is retrieved
+   - Long-term memory/summaries are incorporated
+   - A prompt is constructed with all context
+   - The prompt is sent to the LLM through the RAG system
+   - Products mentioned in the response are enriched with details
+4. Response is cached and returned to the user
+5. Conversation history is updated
 
-Response format is the same as `/ask`, but the endpoint maintains conversation history for follow-up questions.
+## Development
 
-## Testing the API
+### File Structure Details
 
-A test script is included to quickly test the API:
+- **src/config/index.js**: Configuration loading from environment and JSON files
+- **src/services/ragService.js**: RAG application setup and query handling
+- **src/services/cacheService.js**: Response caching functionality
+- **src/services/memoryService.js**: Conversation and memory management
+- **src/controllers/chatController.js**: Request processing logic
+- **src/routes/index.js**: API endpoint definitions
+- **src/utils/network.js**: Network utility functions
+- **src/index.js**: Application entry point
 
-```bash
-# With default question
-npm run test:api
+### Adding New Features
 
-# With custom question
-npm run test:api -- "Do you have any baby strollers?"
-```
+1. For new API endpoints:
+   - Add route handlers to `src/routes/`
+   - Create new controllers in `src/controllers/`
 
-## Extending the System
+2. For new functionality:
+   - Add service modules in `src/services/`
+   - Update existing services as needed
 
-- Add authentication for API endpoints
-- Implement caching with Redis for faster responses
-- Add a web interface for easy querying
-- Implement personalized recommendations based on user history
-- Add support for multiple languages 
+## Migrating from Legacy to New Architecture
+
+The application supports both the legacy (index.mjs) and new (src/index.js) architectures. To migrate:
+
+1. Test the new architecture:
+   ```
+   npm run dev:new
+   ```
+
+2. Update your Docker setup:
+   Change `CMD ["node", "index.mjs"]` to `CMD ["node", "src/index.js"]` in your Dockerfile
+
+3. Deploy the new version:
+   ```
+   npm run start:new
+   ```
+
+## License
+
+ISC 
