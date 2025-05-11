@@ -1,16 +1,13 @@
 {
   "name": "product-assitant-api",
   "version": "1.0.0",
-  "main": "index.mjs",
+  "main": "src/index.js",
   "type": "module",
   "scripts": {
-    "start": "node index.mjs",
-    "start:new": "node src/index.js",
-    "dev": "nodemon index.mjs",
-    "dev:new": "nodemon src/index.js",
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
     "generate-embeddings": "node generate-embeddings.mjs",
     "setup": "node generate-embeddings.mjs && npm run start",
-    "setup:new": "node generate-embeddings.mjs && npm run start:new",
     "test:api": "node test.mjs",
     "test": "echo \"Error: no test specified\" && exit 1"
   },

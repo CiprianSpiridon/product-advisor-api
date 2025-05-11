@@ -1,5 +1,13 @@
 # Product Assistant API
 
+> **IMPORTANT: Implementation Update**
+> 
+> This project has been migrated from a monolithic architecture to a modular structure. The implementation is located in the `src/` directory.
+> 
+> - Legacy file (`index.mjs`) has been deprecated
+> - Use `npm start` or `npm run dev` to run the application
+> - See `src/README.md` for details on the architecture
+
 A RAG-based (Retrieval-Augmented Generation) product recommendation API that leverages OpenAI's models, vector embeddings, and product data to provide personalized product recommendations and answer product-related questions.
 
 ## Features
@@ -24,7 +32,7 @@ product-assitant-api/
 ├── input_data/            # Source data for embeddings
 ├── packages/              # Local dependencies
 │   └── embedjs-mongodb/   # MongoDB integration for embedjs
-├── src/                   # Application source code (refactored)
+├── src/                   # Application source code
 │   ├── config/            # Configuration loading and management
 │   ├── controllers/       # Request handlers
 │   ├── middleware/        # Express middleware
@@ -33,7 +41,7 @@ product-assitant-api/
 │   └── utils/             # Utility functions
 ├── db.mjs                 # Database connection and product retrieval
 ├── generate-embeddings.mjs # Script to generate vector embeddings
-├── index.mjs              # Legacy entry point
+├── index.mjs.deprecated   # Deprecated legacy entry point
 └── docker-compose.yml     # Docker services configuration
 ```
 
@@ -76,14 +84,14 @@ product-assitant-api/
 npm run generate-embeddings
 
 # Start the server in development mode with auto-reload
-npm run dev:new
+npm run dev
 ```
 
 #### Production Mode
 
 ```bash
 # Start the server in production mode
-npm run start:new
+npm start
 ```
 
 #### Docker Deployment
@@ -237,22 +245,16 @@ Response:
    - Add service modules in `src/services/`
    - Update existing services as needed
 
-## Migrating from Legacy to New Architecture
+## Completed Migration to New Architecture
 
-The application supports both the legacy (index.mjs) and new (src/index.js) architectures. To migrate:
+The application has been fully migrated from its legacy monolithic architecture to a modular structure in the `src/` directory. The key improvements include:
 
-1. Test the new architecture:
-   ```
-   npm run dev:new
-   ```
+1. Better separation of concerns with dedicated service modules
+2. Cleaner code organization following MVC principles
+3. Improved maintainability and testability
+4. More consistent error handling
 
-2. Update your Docker setup:
-   Change `CMD ["node", "index.mjs"]` to `CMD ["node", "src/index.js"]` in your Dockerfile
-
-3. Deploy the new version:
-   ```
-   npm run start:new
-   ```
+The legacy `index.mjs` file has been preserved with a `.deprecated` extension for reference purposes but is no longer used.
 
 ## License
 

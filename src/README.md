@@ -1,6 +1,6 @@
-# Product Assistant API - Refactored Architecture
+# Product Assistant API - Modular Architecture
 
-This is a refactored version of the product assistant API with a proper file structure.
+This is the main implementation of the product assistant API with a properly organized file structure.
 
 ## Directory Structure
 
@@ -24,17 +24,17 @@ src/
 
 ## Running the Application
 
-To run this refactored version:
+To run the application:
 
 ```bash
 # Install dependencies
 npm install
 
-# Start the server using the new structure
-npm run dev:new
+# Start the server in development mode
+npm run dev
 
 # Or in production mode
-npm run start:new
+npm start
 ```
 
 ## Enhancements
@@ -44,6 +44,6 @@ npm run start:new
 3. **Testability**: Components can be tested in isolation
 4. **Reusability**: Services can be reused across different controllers and routes
 
-## Migration
+## Architecture Notes
 
-This refactored version maintains full compatibility with the original API. The original index.mjs is kept for reference, but new development should use this structure. 
+This modular architecture provides a robust foundation for ongoing development and maintenance. All new features should be implemented within this structure. 
