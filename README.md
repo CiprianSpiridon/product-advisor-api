@@ -155,6 +155,54 @@ Response:
 
 ## Data Flow
 
+```
+┌─────────┐       ┌───────────────┐       ┌────────────────┐       ┌────────────────┐
+│  User   │       │   API Routes  │       │ ChatController │       │ Cache Service  │
+│ Request ├───────► /ask or /chat ├───────► handleQuery()  ├───────► Check Cache    │
+└─────────┘       └───────────────┘       └────────┬───────┘       └────┬───────────┘
+                                                   │                    │
+                                                   │   Cache Miss       │
+                                                   ▼                    │
+┌──────────────────┐       ┌────────────────┐     │                    │
+│ Product Database │       │ Memory Service │◄────┘                    │
+│ (MongoDB)        │◄──────┤ - Conversation │                          │
+└──────────────────┘       │ - Memory       │                          │
+         ▲                 └────────┬───────┘                          │
+         │                          │                                  │
+         │                          ▼                                  │
+         │              ┌────────────────────┐                         │
+         │              │ Build Prompt with:  │                         │
+         │              │ - User context      │                         │
+         │              │ - Memory            │                         │
+         │              │ - Conversation      │                         │
+         │              └──────────┬─────────┘                         │
+         │                         │                                   │
+         │                         ▼                                   │
+┌────────┴───────┐     ┌────────────────┐                             │
+│ Get Product    │     │  RAG Service   │                             │
+│ Details        │◄────┤  Query LLM     │                             │
+└────────────────┘     └───────┬────────┘                             │
+                               │                                      │
+                               ▼                                      │
+                       ┌────────────────┐                             │
+                       │  Vector Search │                             │
+                       │  (Qdrant)      │                             │
+                       └───────┬────────┘                             │
+                               │                                      │
+                               ▼                                      │
+                       ┌────────────────┐        ┌──────────────┐     │
+                       │ JSON Response  │        │ Save to Cache │     │
+                       │ Construction   ├────────► & Update      │     │
+                       └───────┬────────┘        │ Conversation  │     │
+                               │                 └──────┬────────┘     │
+                               │                        │              │
+                               ▼                        │      Cache Hit
+                       ┌────────────────┐               │              │
+                       │ Response sent  │◄──────────────┴──────────────┘
+                       │ to User        │
+                       └────────────────┘
+```
+
 1. User sends a query to the API
 2. System checks cache for existing response
 3. If not cached, the query is processed:
