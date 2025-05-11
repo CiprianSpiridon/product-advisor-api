@@ -1,0 +1,64 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: docker/app/Dockerfile
+    container_name: product_assistant_app
+    ports:
+      - "${APP_PORT:-3000}:${APP_PORT:-3000}" 
+    volumes:
+      - .:/usr/src/app
+      - /usr/src/app/node_modules # Anonymous volume to prevent host node_modules from overwriting container's
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - OPENAI_API_KEY=${OPENAI_API_KEY} # Ensure this is in your .env file
+      - QDRANT_HOST=${QDRANT_HOST:-qdrant}
+      - QDRANT_PORT=${QDRANT_HTTP_PORT:-6333} # App connects to Qdrant HTTP port
+      - QDRANT_API_KEY=${QDRANT_API_KEY}
+      - QDRANT_COLLECTION_NAME=${QDRANT_COLLECTION_NAME:-product_embeddings}
+      - MONGO_HOST=${MONGO_HOST:-mongo}
+      - MONGO_PORT=${MONGO_PORT:-27017}
+      - MONGO_USER=${MONGO_INITDB_ROOT_USERNAME:-root}
+      - MONGO_PASSWORD=${MONGO_INITDB_ROOT_PASSWORD:-secret}
+      - MONGO_DATABASE=${MONGO_DATABASE:-product_db}
+      - MONGO_STORE_CONNECTION_URI=${MONGO_STORE_CONNECTION_URI:-}
+      - MONGO_COLLECTION_CONVERSATIONS=${MONGO_COLLECTION_CONVERSATIONS:-rag_conversations}
+      - MONGO_COLLECTION_MEMORIES=${MONGO_COLLECTION_MEMORIES:-rag_memories}
+      - MONGO_COLLECTION_CACHE=${MONGO_COLLECTION_CACHE:-rag_cache}
+      - MONGO_COLLECTION_PRODUCTS=${MONGO_COLLECTION_PRODUCTS:-products}
+    depends_on:
+      # - mysql # Removed
+      - qdrant
+      - mongo
+    # If you need to run generate-embeddings.mjs, you can do it via:
+    # docker-compose run --rm app node generate-embeddings.mjs
+
+ 
+
+  qdrant:
+    image: qdrant/qdrant:${QDRANT_IMAGE_TAG:-latest}
+    container_name: product_assistant_qdrant
+    ports:
+      - "${QDRANT_HTTP_PORT:-6333}:6333" # HTTP API
+      - "${QDRANT_GRPC_PORT:-6334}:6334" # gRPC API
+    # environment: # Uncomment and set if Qdrant needs API key
+      # QDRANT_API_KEY: ${QDRANT_API_KEY}
+    volumes:
+      - ./docker/data/qdrant:/qdrant/storage
+    restart: unless-stopped
+
+  mongo:
+    image: mongo:${MONGO_IMAGE_TAG:-latest}
+    container_name: product_assistant_mongo
+    ports:
+      - "${MONGO_PORT:-27017}:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:-root}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:-secret}
+      MONGO_INITDB_DATABASE: ${MONGO_DATABASE:-product_db} # Optional: creates a db on init
+    volumes:
+      - ./docker/data/mongo:/data/db
+    restart: unless-stopped
+
+# volumes:
+#   qdrant_data: 

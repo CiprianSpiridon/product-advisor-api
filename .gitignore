@@ -44,4 +44,9 @@ Thumbs.db
 *.ntvs*
 *.njsproj
 *.sln
-*.sw? 
+*.sw?
+
+input_data/ 
+
+# Docker persistent data
+docker/data/ 

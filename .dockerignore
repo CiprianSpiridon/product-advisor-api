@@ -1,0 +1,26 @@
+node_modules
+npm-debug.log
+
+# Git
+.git
+.gitignore
+
+# Environment files (if you don't want them in the image, 
+# though .env is often used by docker-compose to set vars)
+# .env
+
+# Docker specific files (usually not needed inside the image itself)
+Dockerfile
+docker-compose.yml
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Optional: Add build artifacts or local config files not needed in production image
+# build/
+# dist/
+# *.local
+# temp_data/
+# products.db # old sqlite db
+# vectordb/ # old lancedb data 

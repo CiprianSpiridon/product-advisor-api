@@ -3,7 +3,7 @@
 import { RAGApplicationBuilder, SIMPLE_MODELS } from '@llm-tools/embedjs';
 import { OpenAiEmbeddings } from '@llm-tools/embedjs-openai';
 import { CsvLoader } from '@llm-tools/embedjs-loader-csv';
-import { LanceDb } from '@llm-tools/embedjs-lancedb';
+import { QdrantDb } from '@llm-tools/embedjs-qdrant';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -38,14 +38,19 @@ const SEARCH_RESULT_COUNT = parseInt(process.env.SEARCH_RESULT_COUNT || appConfi
 const TEMPERATURE = parseFloat(process.env.TEMPERATURE || appConfig.rag.temperature);
 const EMBEDDING_BATCH_SIZE = parseInt(process.env.EMBEDDING_BATCH_SIZE || appConfig.rag.embeddingBatchSize, 10);
 
+// Qdrant Configuration from environment variables
+const QDRANT_HOST = process.env.QDRANT_HOST;
+const QDRANT_HTTP_PORT = parseInt(process.env.QDRANT_HTTP_PORT, 10);
+const QDRANT_API_KEY = process.env.QDRANT_API_KEY; // Can be undefined if not set
+const QDRANT_COLLECTION_NAME = process.env.QDRANT_COLLECTION_NAME || 'product_embeddings';
+
 // Path configuration
 const csvPath = path.join(path.dirname(fileURLToPath(import.meta.url)), appConfig.dataLoader.csvPath);
-const dbPath = path.join(path.dirname(fileURLToPath(import.meta.url)), appConfig.vectorDb.path);
 const tempDir = path.join(path.dirname(fileURLToPath(import.meta.url)), 'temp_data');
 const PROGRESS_FILE_PATH = path.join(tempDir, 'embedding_progress.json');
 
 // Batching configuration
-const MAX_RECORDS_PER_SUB_BATCH = 100; // User-defined preferred records per sub-batch
+const MAX_RECORDS_PER_SUB_BATCH = 1; // User-defined preferred records per sub-batch
 const MAX_CHARS_PER_API_BATCH = 750000; // Safeguard for API token limits
 
 function readLastProcessedRecordIndex() {
@@ -92,19 +97,27 @@ async function importDataToSQLite() {
 }
 
 async function generateEmbeddings() {
+  // Construct the Qdrant URL
+  const qdrantUrl = `http://${QDRANT_HOST}:${QDRANT_HTTP_PORT}`;
   console.log('Step 2: Starting embedding generation process...');
   console.log(`Loading products from ${csvPath}`);
-  console.log(`Storing embeddings in ${dbPath}`);
+  console.log(`Storing embeddings in Qdrant: URL: '${qdrantUrl}', Collection (ClusterName): '${QDRANT_COLLECTION_NAME}'`);
 
   try {
     if (!fs.existsSync(tempDir)) {
       fs.mkdirSync(tempDir, { recursive: true });
     }
+    
+    console.log(`QdrantDb PRE-INIT (generate-embeddings): URL: '${qdrantUrl}', API Key: '${QDRANT_API_KEY ? "Exists" : "Not Set"}', ClusterName: '${QDRANT_COLLECTION_NAME}'`);
 
     const ragApplication = await new RAGApplicationBuilder()
       .setEmbeddingModel(new OpenAiEmbeddings({ batchSize: EMBEDDING_BATCH_SIZE }))
       .setModel(SIMPLE_MODELS.OPENAI_GPT4_TURBO)
-      .setVectorDatabase(new LanceDb({ path: dbPath }))
+      .setVectorDatabase(new QdrantDb({ 
+        url: qdrantUrl,                       // Correct: Pass the full URL
+        apiKey: QDRANT_API_KEY,               // Correct: Pass apiKey directly
+        clusterName: QDRANT_COLLECTION_NAME   // Correct: Use clusterName
+      }))
       .setTemperature(TEMPERATURE)
       .setSearchResultCount(SEARCH_RESULT_COUNT)
       .build();
@@ -137,6 +150,8 @@ async function generateEmbeddings() {
         console.log("CSV file is empty or has no header.");
         return true;
     }
+    // Define the single header for our formatted text representation
+    const formattedTextHeader = "product_text_representation"; 
 
     while (currentRecordIndex < allRecords.length) {
       batchNumber++;
@@ -179,41 +194,46 @@ async function generateEmbeddings() {
 
       const batchFilePath = path.join(tempDir, `_temp_api_batch_${batchNumber}.csv`);
       
-      const csvLines = subBatchRecords.map(record => {
-        // Create a filtered version of the record without image and url
-        // but make sure to keep the SKU field
+      // Create the formatted text representation for each product
+      const formattedProductTexts = subBatchRecords.map(record => {
         const filteredRecord = {...record};
         delete filteredRecord.image;
         delete filteredRecord.url;
         
-        // Ensure SKU is present and properly formatted
+        // Ensure SKU is present and properly formatted (though it will be part of the text)
         if (!filteredRecord.sku || filteredRecord.sku.trim() === '') {
-          console.warn(`Warning: Record is missing a valid SKU: ${JSON.stringify(record)}`);
+          console.warn(`Warning: Record is missing a valid SKU (will still be processed): ${JSON.stringify(record)}`);
         }
         
-        return Object.values(filteredRecord).map(value => {
-          const strValue = String(value);
-          if (strValue.includes(',') || strValue.includes('\"') || strValue.includes('\n')) {
-            return `\"${strValue.replace(/\"/g, '\"\"')}\"`
-          }
-          return strValue;
-        }).join(',');
+        // Construct the "FieldName: Value" string
+        // Use original header field names for clarity if possible, or just iterate keys
+        // For this example, let's use the keys from the filteredRecord directly
+        let textRepresentation = Object.entries(filteredRecord)
+          .map(([key, value]) => `${key.charAt(0).toUpperCase() + key.slice(1)}: ${String(value).trim()}`)
+          .join('\n');
+        
+        return textRepresentation;
       });
 
-      // Create a filtered header, removing image and url but keeping SKU
-      const headerFields = header.split(',');
-      const filteredHeader = headerFields.filter(field => field !== 'image' && field !== 'url').join(',');
-      
-      // Log SKU check for the first few records
-      if (batchNumber === 1) {
-        console.log("SKU Check for first 3 records:");
-        for (let i = 0; i < Math.min(3, subBatchRecords.length); i++) {
-          console.log(`Record ${i+1} - SKU: ${subBatchRecords[i].sku || 'MISSING'}`);
+      // The CSV lines will now be just the formatted texts, each needing to be a single CSV field (quoted if it contains newlines)
+      const csvLines = formattedProductTexts.map(text => {
+        // Ensure the entire multi-line text is treated as a single CSV field
+        // by quoting it and escaping internal quotes.
+        const strValue = String(text);
+        if (strValue.includes(',') || strValue.includes('\"') || strValue.includes('\n')) {
+          return `\"${strValue.replace(/\"/g, '\"\"')}\"`
         }
+        return strValue;
+      });
+      
+      // Log SKU check for the first few records (from the original subBatchRecords)
+      if (batchNumber === 1 && subBatchRecords.length > 0) {
+        console.log("SKU Check for first record in first batch:");
+        console.log(`Record 1 - SKU: ${subBatchRecords[0].sku || 'MISSING'}`);
       }
 
-      fs.writeFileSync(batchFilePath, [filteredHeader, ...csvLines].join('\n'));
-      console.log(`Created temporary batch file for ${subBatchRecords.length} records`);
+      fs.writeFileSync(batchFilePath, [formattedTextHeader, ...csvLines].join('\n'));
+      console.log(`Created temporary batch file with formatted text for ${subBatchRecords.length} records`);
 
       try {
         await ragApplication.addLoader(new CsvLoader({ filePathOrUrl: batchFilePath }));

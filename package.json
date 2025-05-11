@@ -22,16 +22,17 @@
   "description": "Product Assistant RAG API using embedjs",
   "dependencies": {
     "@llm-tools/embedjs": "^0.1.28",
-    "@llm-tools/embedjs-loader-csv": "^0.1.28",
-    "@llm-tools/embedjs-openai": "^0.1.28",
     "@llm-tools/embedjs-lancedb": "^0.1.28",
+    "@llm-tools/embedjs-loader-csv": "^0.1.28",
+    "@llm-tools/embedjs-mongodb": "file:./packages/embedjs-mongodb",
+    "@llm-tools/embedjs-openai": "^0.1.28",
+    "@llm-tools/embedjs-qdrant": "^0.1.28",
     "cors": "^2.8.5",
     "csv-parse": "^5.5.3",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
-    "morgan": "^1.10.0",
-    "sqlite": "^5.1.1",
-    "sqlite3": "^5.1.6"
+    "mongodb": "^6.3.0",
+    "morgan": "^1.10.0"
   },
   "devDependencies": {
     "chalk": "^5.3.0",

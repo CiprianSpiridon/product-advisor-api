@@ -1,0 +1,35 @@
+{
+    "compilerOptions": {
+        "sourceMap": true,
+        "esModuleInterop": true,
+        "emitDecoratorMetadata": true,
+        "experimentalDecorators": true,
+        "importHelpers": true,
+        "skipLibCheck": true,
+        "skipDefaultLibCheck": true,
+        "baseUrl": ".",
+        "target": "ES2022",
+        "lib": ["ES2022", "ES2022.Object"],
+        "module": "NodeNext",
+        "moduleResolution": "nodenext",
+        "noImplicitReturns": true,
+        "noFallthroughCasesInSwitch": true,
+        "noUnusedLocals": true,
+        "noUnusedParameters": true,
+        "useDefineForClassFields": true,
+        "strictPropertyInitialization": false,
+        "allowJs": false,
+        "strict": false,
+        "outDir": "./lib",
+        "declaration": true,
+        "types": ["node"]
+    },
+    "include": ["src/**/*.ts"],
+    "exclude": [
+        "node_modules", 
+        "lib", 
+        "dist", 
+        "src/**/*.spec.ts", 
+        "src/**/*.test.ts"
+    ]
+}

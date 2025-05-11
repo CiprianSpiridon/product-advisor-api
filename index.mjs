@@ -2,67 +2,17 @@
 
 import { RAGApplicationBuilder, SIMPLE_MODELS } from '@llm-tools/embedjs';
 import { OpenAiEmbeddings } from '@llm-tools/embedjs-openai';
-import { CsvLoader } from '@llm-tools/embedjs-loader-csv';
-import { LanceDb } from '@llm-tools/embedjs-lancedb';
+import { QdrantDb } from '@llm-tools/embedjs-qdrant';
+import { MongoStore } from '@llm-tools/embedjs-mongodb';
 import express from 'express';
 import cors from 'cors';
 import morgan from 'morgan';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import fs from 'fs'; // For reading the prompt config file
-import { networkInterfaces } from 'os'; // Import networkInterfaces from os
-import { initDatabase, importProductsFromCSV, getProductsBySKUs, closeDatabase } from './db.mjs';
-
-// Simple in-memory cache implementation
-class QueryCache {
-  constructor(maxSize = 100, ttlInSeconds = 3600) {
-    this.cache = new Map();
-    this.maxSize = maxSize;
-    this.ttlInSeconds = ttlInSeconds;
-  }
-
-  generateKey(userId, query, userMetadata) {
-    // Create a unique key based on user ID, query, and metadata
-    const metadataString = JSON.stringify(userMetadata || {});
-    return `${userId}:${query}:${metadataString}`;
-  }
-
-  get(userId, query, userMetadata) {
-    const key = this.generateKey(userId, query, userMetadata);
-    const item = this.cache.get(key);
-    
-    if (!item) return null;
-    
-    // Check if the item has expired
-    if (Date.now() > item.expiresAt) {
-      this.cache.delete(key);
-      return null;
-    }
-    
-    return item.data;
-  }
-
-  set(userId, query, userMetadata, data) {
-    // Clean up if cache is full
-    if (this.cache.size >= this.maxSize) {
-      // Delete oldest entry
-      const oldestKey = this.cache.keys().next().value;
-      this.cache.delete(oldestKey);
-    }
-    
-    const key = this.generateKey(userId, query, userMetadata);
-    const expiresAt = Date.now() + (this.ttlInSeconds * 1000);
-    this.cache.set(key, { data, expiresAt });
-  }
-  
-  clear() {
-    this.cache.clear();
-  }
-}
-
-// Initialize the cache
-const queryCache = new QueryCache(100, 3600); // Maximum 100 entries, 1 hour TTL
+import fs from 'fs';
+import { networkInterfaces } from 'os';
+import { initDatabase, getProductsBySKUs, closeDatabase } from './db.mjs';
 
 // Load environment variables
 dotenv.config({ path: path.join(path.dirname(fileURLToPath(import.meta.url)), './.env') });
@@ -71,13 +21,11 @@ dotenv.config({ path: path.join(path.dirname(fileURLToPath(import.meta.url)), '.
 let appConfig, promptConfig;
 
 try {
-  // Load app configuration
   const appConfigPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'config/app.json');
   const appConfigContent = fs.readFileSync(appConfigPath, 'utf8');
   appConfig = JSON.parse(appConfigContent);
   console.log("App configuration loaded from config/app.json");
   
-  // Load prompt configuration
   const promptConfigPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'config/prompts.json');
   const promptConfigContent = fs.readFileSync(promptConfigPath, 'utf8');
   promptConfig = JSON.parse(promptConfigContent);
@@ -93,301 +41,317 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const SEARCH_RESULT_COUNT = parseInt(process.env.SEARCH_RESULT_COUNT || appConfig.rag.searchResultCount, 10);
 const TEMPERATURE = parseFloat(process.env.TEMPERATURE || appConfig.rag.temperature);
 const EMBEDDING_BATCH_SIZE = parseInt(process.env.EMBEDDING_BATCH_SIZE || appConfig.rag.embeddingBatchSize, 10);
-const VECTOR_DB_PATH = appConfig.vectorDb.path;
+
+// Qdrant Configuration
+const QDRANT_HOST = process.env.QDRANT_HOST;
+const QDRANT_HTTP_PORT = parseInt(process.env.QDRANT_HTTP_PORT, 10);
+const QDRANT_API_KEY = process.env.QDRANT_API_KEY;
+const QDRANT_COLLECTION_NAME = process.env.QDRANT_COLLECTION_NAME || 'product_embeddings';
+
+// MongoDB Store Configuration Names (used by MongoStore)
+const MONGO_DATABASE_STORE = process.env.MONGO_DATABASE || 'product_db'; // DB for MongoStore
+const MONGO_COLLECTION_CONVERSATIONS = process.env.MONGO_COLLECTION_CONVERSATIONS || 'rag_conversations';
+const MONGO_COLLECTION_MEMORIES_AS_CUSTOM_DATA = process.env.MONGO_COLLECTION_MEMORIES || 'rag_memories'; // Assuming memories map to customData
+const MONGO_COLLECTION_CACHE = process.env.MONGO_COLLECTION_CACHE || 'rag_cache';
 
 if (!OPENAI_API_KEY) {
   console.error('Error: OPENAI_API_KEY is required');
   process.exit(1);
 }
 
-// Initialize Express
 const app = express();
 app.use(cors());
 app.use(express.json());
-app.use(morgan('dev')); // Logging
+app.use(morgan('dev'));
 
-// RAG System Configuration
-const csvPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '../products.csv');
-const dbPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'vectordb');
-
-// Initialize RAG system
 let ragApplication = null;
+let mongoStore = null;
 
-// --- Short-term conversation history (simple in-memory store for demo) ---
-const conversationHistories = {}; // { userId: ["User: Hi", "Bot: Hello!"] }
-
-async function initRAG() {
-  console.log('Initializing RAG system...');
-  console.log('Using pre-generated embeddings from vector database...');
-  
-  try {
-    // Create the RAG application with embedJs
-    const dbPath = path.join(path.dirname(fileURLToPath(import.meta.url)), VECTOR_DB_PATH);
-    
-    console.log(`Configuring RAG with: Search Results: ${SEARCH_RESULT_COUNT}, Temperature: ${TEMPERATURE}, Embedding Batch Size: ${EMBEDDING_BATCH_SIZE}`);
-
-    ragApplication = await new RAGApplicationBuilder()
-      .setEmbeddingModel(new OpenAiEmbeddings({
-        apiKey: process.env.OPENAI_API_KEY, 
-        batchSize: EMBEDDING_BATCH_SIZE 
-      }))
-      .setModel(SIMPLE_MODELS.OPENAI_GPT4_O)
-      .setVectorDatabase(new LanceDb({ path: dbPath }))
-      .setTemperature(TEMPERATURE)
-      .setSearchResultCount(SEARCH_RESULT_COUNT)
-      .build();
-    
-    // Skip the CSV loading step as embeddings should be pre-generated
-    // using the generate-embeddings.mjs script
-    
-    console.log('RAG system initialized successfully');
-    return true;
-  } catch (error) {
-    console.error('Error initializing RAG system:', error);
-    console.error('Make sure to run generate-embeddings.mjs first to create the vector database');
-    return false;
-  }
-}
-
-// API routes
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-app.post('/ask', async (req, res) => {
-  // Accept both 'query' and 'question' for backward compatibility
-  const userQuery = req.body.query || req.body.question;
-  const user = req.body.user || {};
-  const userId = user.id || req.body.userId || req.query.userId || 'default_user';
-  const userName = user.name || '';
-  const children = user.children || [];
+// Helper function to generate a consistent cache key
+function generateCacheKey(userId, query, userMetadata) {
+    const metadataString = JSON.stringify(userMetadata || {});
+    return `cache:${userId}:${query}:${metadataString}`; 
+}
 
-  if (!userQuery) {
-    return res.status(400).json({ answer: "Query is required.", relatedProducts: [] });
-  }
+async function handleQuery(req, res, endpointName) {
+    console.log(`[${endpointName}] Request received for user: ${req.body.userId || 'default_user'}`);
+    const userQuery = req.body.query || req.body.question;
+    const user = req.body.user || {};
+    const userId = user.id || req.body.userId || req.query.userId || 'default_user';
+    const userName = user.name || '';
+    const children = user.children || [];
 
-  if (!ragApplication || !promptConfig) {
-    return res.status(503).json({
-      answer: "RAG system or prompt configuration not initialized yet",
-      relatedProducts: []
-    });
-  }
-
-  // Check cache first
-  const cachedResult = queryCache.get(userId, userQuery, { name: userName, children });
-  if (cachedResult) {
-    console.log(`Cache hit for query: "${userQuery.substring(0, 30)}..." by user ${userId}`);
-    return res.json(cachedResult);
-  }
-
-  if (!conversationHistories[userId]) {
-    conversationHistories[userId] = [];
-  }
-
-  // Construct the prompt using loaded config (same logic as /chat)
-  const longTermMemoryContext = await retrieveMemories(userId, userQuery);
-  const { systemPreamble, answerFieldDetails, relatedProductsFieldDetails, closingInstruction } = promptConfig.jsonOutputInstructions;
-  
-  let promptForRAG = `${systemPreamble}\n\n${answerFieldDetails}\n\n${relatedProductsFieldDetails}\n\n`;
-
-  // Inject user metadata
-  if (userName || (children && children.length > 0)) {
-    promptForRAG += `User profile:\n`;
-    if (userName) promptForRAG += `- Name: ${userName}\n`;
-    if (children.length > 0) {
-      promptForRAG += `- Children:\n`;
-      for (const child of children) {
-        promptForRAG += `  - Name: ${child.name || ''}, Age: ${child.age || ''}, Gender: ${child.gender || ''}, Birthday: ${child.birthday || ''}\n`;
-      }
+    if (!userQuery) {
+        console.log(`[${endpointName}] Query is missing.`);
+        return res.status(400).json({ answer: "Query is required.", relatedProducts: [] });
     }
-    promptForRAG += '\n';
-  }
 
-  if (longTermMemoryContext) {
-      promptForRAG += `Relevant past information for ${userId}:\n${longTermMemoryContext}\n\n`;
-  }
-
-  const shortTermHistoryText = conversationHistories[userId].join("\n");
-  if (shortTermHistoryText) {
-      promptForRAG += `Current conversation history:\n${shortTermHistoryText}\n\n`;
-  }
-
-  promptForRAG += `User's current query: ${userQuery}\n\n${closingInstruction}`;
-
-  // Log the prompt sent to the model
-  console.log("--- Prompt sent to LLM (/ask): ---");
-  console.log(promptForRAG);
-  console.log("-----------------------------------");
-
-  console.log(`Processing augmented query for user ${userId} in /ask endpoint...`);
-  // console.log("Prompt for RAG (/ask):", promptForRAG); // For debugging
-
-  try {
-    // Add a timeout promise
-    const timeout = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error('Request timed out after 15 seconds')), 15000);
-    });
-    
-    // Log warning about potential issue with SKUs
-    console.log("--- RAG Context Note (/ask) ---");
-    console.log("Executing RAG query - if no real SKUs are found, the LLM will return an empty array");
-    console.log("--------------------------------");
-    
-    // Race the RAG query against the timeout
-    const result = await Promise.race([
-      ragApplication.query(promptForRAG),
-      timeout
-    ]);
-    
-    // Log the complete result object for debugging
-    console.log("--- Complete RAG result object (/ask): ---");
-    console.log(JSON.stringify(result, null, 2));
-    console.log("----------------------------------");
-    
-    // Extract the LLM output from the result object
-    let llmOutputString = result.answer || result.content || result.text || result.response || '';
-
-    // Log the direct output from the LLM for debugging
-    console.log("--- /ask endpoint: LLM Raw Output (extracted) ---");
-    console.log(llmOutputString);
-    console.log("---------------------------------------------------");
-
-    let botResponseJson;
-    try {
-        if (typeof llmOutputString !== 'string' || llmOutputString.trim() === "") {
-            console.error("/ask: LLM output (result.answer) is not a non-empty string. Value:", llmOutputString);
-            throw new Error("LLM output is not a non-empty string, cannot parse.");
-        }
-        
-        // Clean the output string if it contains markdown code fences
-        let cleanedOutput = llmOutputString;
-        if (llmOutputString.includes("```")) {
-            // Extract content from between code fences (```json ... ```)
-            const codeBlockMatch = llmOutputString.match(/```(?:json)?\s*([\s\S]*?)```/);
-            if (codeBlockMatch && codeBlockMatch[1]) {
-                cleanedOutput = codeBlockMatch[1].trim();
-            }
-        }
-        
-        botResponseJson = JSON.parse(cleanedOutput);
-
-        // Validate the structure: answer (string) and relatedProducts (array of strings)
-        if (typeof botResponseJson.answer !== 'string' || !Array.isArray(botResponseJson.relatedProducts)) {
-            console.warn("/ask: LLM output was valid JSON but not the expected top-level structure. LLM Raw:", llmOutputString);
-            throw new Error("LLM output is not in the expected {answer: string, relatedProducts: array} format.");
-        }
-
-        // Validate that relatedProducts contains strings (SKUs)
-        for (let i = 0; i < botResponseJson.relatedProducts.length; i++) {
-            if (typeof botResponseJson.relatedProducts[i] !== 'string') {
-                console.warn(`/ask: Item at index ${i} in relatedProducts is not a string. Converting to string.`);
-                botResponseJson.relatedProducts[i] = String(botResponseJson.relatedProducts[i]);
-            }
-        }
-        
-        // Look up full product details from SQLite
-        console.log(`Looking up ${botResponseJson.relatedProducts.length} products by SKU in SQLite database`);
-        const productDetails = await getProductsBySKUs(botResponseJson.relatedProducts);
-        console.log(`Found ${productDetails.length} matching products in database`);
-        
-        // Replace the array of SKUs with the array of product objects
-        botResponseJson.relatedProducts = productDetails;
-
-    } catch (e) {
-        console.error("/ask: Failed to parse LLM response as JSON or structure was invalid:", e.message);
-        // console.error("/ask: LLM raw output was:", llmOutputString); // Already logged above
-        botResponseJson = { // Fallback
-            answer: "I had a little trouble formatting my response perfectly with all details. Here's the main information: " + (llmOutputString || "Not available"),
+    if (!ragApplication || !promptConfig || !mongoStore) {
+        console.error(`[${endpointName}] Critical component not initialized: RAG: ${!!ragApplication}, PromptConfig: ${!!promptConfig}, MongoStore: ${!!mongoStore}`);
+        return res.status(503).json({
+            answer: `RAG system, prompt configuration, or MongoStore not initialized yet for ${endpointName}`,
             relatedProducts: []
-        };
+        });
     }
 
-    // Update short-term history ONLY if the answer is valid
-    if (botResponseJson && typeof botResponseJson.answer === 'string' && botResponseJson.answer.trim() !== '' && botResponseJson.answer.indexOf('I had a little trouble formatting my response') === -1) {
-        conversationHistories[userId].push(`User: ${userQuery}`);
-        conversationHistories[userId].push(`Bot: ${botResponseJson.answer}`);
+    try {
+        // 1. Cache Handling
+        const userMetadataForCacheKey = { name: userName, children };
+        const cacheKey = generateCacheKey(userId, userQuery, userMetadataForCacheKey);
+        let cachedResultDocument = null;
+
+        try {
+            console.log(`[${endpointName}] Attempting to get cache with key: ${cacheKey}`);
+            cachedResultDocument = await mongoStore.loaderCustomGet(cacheKey); // Assumes this method is safe for cache misses after library fix or workaround
+        } catch (cacheGetError) {
+            console.warn(`[${endpointName}] Error during mongoStore.loaderCustomGet for cache (treating as cache miss): ${cacheGetError.message}`);
+        }
+
+        if (cachedResultDocument && cachedResultDocument.data) { // Check for .data property
+            console.log(`[${endpointName}] MongoStore cache hit for query: "${userQuery.substring(0, 30)}..." by user ${userId}`);
+            return res.json(cachedResultDocument.data);
+        }
+        if (!cachedResultDocument || !cachedResultDocument.data) {
+             console.log(`[${endpointName}] Cache miss for key (or error during fetch/no data property): ${cacheKey}`);
+        }
+
+        // 2. Memory Retrieval (Restored - gets the last summary)
+        let longTermMemoryContext = "";
+        const memoryKeyForLastSummary = `memory:${userId}:last_summary`; 
+        console.log(`[${endpointName}] Attempting to get last summary memory with key: ${memoryKeyForLastSummary}`);
+        try {
+            const lastSummaryMemory = await mongoStore.loaderCustomGet(memoryKeyForLastSummary);
+            if (lastSummaryMemory && lastSummaryMemory.text) { // Assuming memory is stored with a .text property
+                longTermMemoryContext = lastSummaryMemory.text;
+                console.log(`[${endpointName}] Retrieved last summary for longTermMemoryContext.`);
+            } else {
+                console.log(`[${endpointName}] No last summary found or no text in memory for longTermMemoryContext.`);
+            }
+        } catch (memoryGetError) {
+            console.warn(`[${endpointName}] Error during mongoStore.loaderCustomGet for memory (treating as no memory): ${memoryGetError.message}`);
+        }
+
+        const { systemPreamble, answerFieldDetails, relatedProductsFieldDetails, closingInstruction } = promptConfig.jsonOutputInstructions;
+        let promptForRAG = `${systemPreamble}\n\n${answerFieldDetails}\n\n${relatedProductsFieldDetails}\n\n`;
+
+        if (userName || (children && children.length > 0)) {
+            promptForRAG += `User profile:\n`;
+            if (userName) promptForRAG += `- Name: ${userName}\n`;
+            if (children.length > 0) {
+                promptForRAG += `- Children:\n`;
+                for (const child of children) {
+                    promptForRAG += `  - Name: ${child.name || ''}, Age: ${child.age || ''}, Gender: ${child.gender || ''}, Birthday: ${child.birthday || ''}\n`;
+                }
+            }
+            promptForRAG += '\n';
+        }
+
+        if (longTermMemoryContext && longTermMemoryContext.trim() !== "") { 
+            promptForRAG += `Relevant past information for ${userId}:\n${longTermMemoryContext}\n\n`;
+        }
+
+        // 3. Conversation History
+        console.log(`[${endpointName}] Checking conversation history for conversationId: ${userId}`);
+        let conversationData = null;
+        const conversationExists = await mongoStore.hasConversation(userId);
+
+        if (conversationExists) {
+            console.log(`[${endpointName}] Existing conversation found for ${userId}. Fetching...`);
+            conversationData = await mongoStore.getConversation(userId); 
+        } else {
+            console.log(`[${endpointName}] No existing conversation found for ${userId}. Creating new one.`);
+            if (typeof mongoStore.addConversation === 'function') {
+                 await mongoStore.addConversation(userId); 
+                 conversationData = await mongoStore.getConversation(userId); 
+                 if (!conversationData) {
+                    console.error(`[${endpointName}] Failed to retrieve conversation immediately after adding for ${userId}. Initializing locally.`);
+                    conversationData = { conversationId: userId, entries: [] }; 
+                 }
+            } else {
+                console.error(`[${endpointName}] mongoStore.addConversation is not a function! Cannot create new conversation.`);
+                conversationData = { conversationId: userId, entries: [] };
+            }
+        }
+        
+        const currentEntries = (conversationData && conversationData.entries) ? conversationData.entries : [];
+        const limitedHistoryEntries = currentEntries.slice(-10);
+        const shortTermHistoryText = limitedHistoryEntries.map(turn => `${turn.role}: ${turn.content}`).join("\n");
+        if (shortTermHistoryText) {
+            promptForRAG += `Current conversation history:\n${shortTermHistoryText}\n\n`;
+        }
+
+        promptForRAG += `User's current query: ${userQuery}\n\n${closingInstruction}`;
+        console.log(`[${endpointName}] --- Prompt sent to LLM ---\n${promptForRAG}\n-----------------------------------`);
+
+        const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('Request timed out after 15 seconds')), 15000));
+        const result = await Promise.race([ragApplication.query(promptForRAG), timeout]);
+
+        console.log(`[${endpointName}] --- Complete RAG result object ---\n${JSON.stringify(result, null, 2)}\n----------------------------------`);
+        let llmOutputString = result.answer || result.content || result.text || result.response || '';
+        console.log(`[${endpointName}] --- LLM Raw Output (extracted) ---\n${llmOutputString}\n---------------------------------------------------`);
+
+        let botResponseJson;
+        try {
+            if (typeof llmOutputString !== 'string' || llmOutputString.trim() === "") {
+                throw new Error("LLM output is not a non-empty string, cannot parse.");
+            }
+            let cleanedOutput = llmOutputString;
+            if (llmOutputString.includes("```")) {
+                const codeBlockMatch = llmOutputString.match(/```(?:json)?\s*([\s\S]*?)```/);
+                if (codeBlockMatch && codeBlockMatch[1]) cleanedOutput = codeBlockMatch[1].trim();
+            }
+            botResponseJson = JSON.parse(cleanedOutput);
+
+            if (typeof botResponseJson.answer !== 'string' || !Array.isArray(botResponseJson.relatedProducts)) {
+                throw new Error("LLM output is not in the expected {answer: string, relatedProducts: array} format.");
+            }
+            botResponseJson.relatedProducts = botResponseJson.relatedProducts.map(sku => typeof sku === 'string' ? sku : String(sku));
+            
+            const productDetails = await getProductsBySKUs(botResponseJson.relatedProducts);
+            botResponseJson.relatedProducts = productDetails;
+
+        } catch (e) {
+            console.error(`[${endpointName}] Failed to parse LLM response or structure was invalid: ${e.message}. LLM Raw: ${llmOutputString}`);
+            botResponseJson = { 
+                answer: `I had a little trouble formatting my response perfectly. Here's the main information: ${llmOutputString || "Not available"}`,
+                relatedProducts: [] 
+            };
+        }
+
+        const isValidResponse = botResponseJson && typeof botResponseJson.answer === 'string' && botResponseJson.answer.trim() !== '' && !botResponseJson.answer.includes('I had a little trouble formatting my response');
+
+        if (isValidResponse) {
+            if (typeof mongoStore.addEntryToConversation === 'function') {
+                console.log(`[${endpointName}] Adding user turn to conversation ${userId}`);
+                await mongoStore.addEntryToConversation(userId, { role: 'User', content: userQuery, timestamp: new Date() });
+                console.log(`[${endpointName}] Adding bot turn to conversation ${userId}`);
+                await mongoStore.addEntryToConversation(userId, { role: 'Bot', content: botResponseJson.answer, timestamp: new Date() });
+            } else {
+                 console.error(`[${endpointName}] mongoStore.addEntryToConversation is not a function! Cannot save conversation turns.`);
+            }
+            
+            // Caching (using corrected loaderCustomSet from your local package if fix was applied)
+            if (typeof mongoStore.loaderCustomSet === 'function') {
+                console.log(`[${endpointName}] Setting cache with key: ${cacheKey}`);
+                await mongoStore.loaderCustomSet(userId, cacheKey, { data: botResponseJson, timestamp: new Date() }); 
+            } else {
+                console.error(`[${endpointName}] mongoStore.loaderCustomSet is not a function! Cannot save to cache.`);
+            }
+        }
+
+        // Summarization and Memory Storage (Restored)
+        const updatedConvDataForSummary = await mongoStore.getConversation(userId); 
+        const freshHistoryEntries = updatedConvDataForSummary && updatedConvDataForSummary.entries ? updatedConvDataForSummary.entries : [];
+
+        if (freshHistoryEntries.length > 0 && freshHistoryEntries.length % 10 === 0) { 
+            const historyTextForSummary = freshHistoryEntries.map(turn => `${turn.role}: ${turn.content}`).join("\n");
+            console.log(`[${endpointName}] Summarizing conversation for ${userId}`);
+            const summary = await summarizeConversation(userId, historyTextForSummary);
+            if (summary && !summary.startsWith("Error") && !summary.startsWith("Could not summarize")){
+                // const memoryKeyForLastSummary = `memory:${userId}:last_summary`; // Already defined above
+                if (typeof mongoStore.loaderCustomSet === 'function') {
+                    console.log(`[${endpointName}] Adding memory (summary) for ${userId} with key: ${memoryKeyForLastSummary}`);
+                    await mongoStore.loaderCustomSet(userId, memoryKeyForLastSummary, { text: summary, type: 'conversation_summary', timestamp: new Date() });
+                } else {
+                    console.error(`[${endpointName}] mongoStore.loaderCustomSet is not a function! Cannot save memory (summary).`);
+                }
+            }
+        }
+        // console.log(`[${endpointName}] Summarization and memory storage logic was processed.`); // Optional log for verbosity
+            
+        res.json(botResponseJson);
+
+    } catch (error) {
+        console.error(`[${endpointName}] Error processing question:`, error);
+        res.status(500).json({ 
+            answer: 'Error processing your question', 
+            relatedProducts: [],
+            details: error.message 
+        });
     }
+}
 
-    // Trigger summarization (example logic)
-    if (conversationHistories[userId].length % 10 === 0 && conversationHistories[userId].length >= 10) {
-        const summary = await summarizeConversation(userId, conversationHistories[userId].join("\n"));
-        await storeMemory(userId, summary);
-    }
-
-    // Store valid responses in cache
-    if (botResponseJson && typeof botResponseJson.answer === 'string' && 
-        botResponseJson.answer.trim() !== '' && 
-        botResponseJson.answer.indexOf('I had a little trouble formatting my response') === -1) {
-      queryCache.set(userId, userQuery, { name: userName, children }, botResponseJson);
-    }
-
-    // Return the parsed and validated (or fallback) JSON as the top-level response
-    res.json(botResponseJson);
-
-  } catch (error) {
-    console.error('Error processing question in /ask:', error);
-    res.status(500).json({ 
-      answer: 'Error processing your question', 
-      relatedProducts: [],
-      details: error.message // Send a clearer error structure
-    });
-  }
-});
-
-// ========================================================================
-// INITIALIZATION
-// ========================================================================
+app.post('/ask', (req, res) => handleQuery(req, res, '/ask'));
+app.post('/chat', (req, res) => handleQuery(req, res, '/chat'));
 
 async function initializeApp() {
-    // Initialize SQLite database
-    console.log("Initializing SQLite database...");
-    const dbInitialized = await initDatabase();
-    if (!dbInitialized) {
-        console.error("FATAL ERROR: Could not initialize SQLite database. Exiting.");
+    console.log("Initializing Product Database (MongoDB)...");
+    const productDbInitialized = await initDatabase(); 
+    if (!productDbInitialized) {
+        console.error("FATAL ERROR: Could not initialize Product Database (MongoDB). Exiting.");
         process.exit(1);
     }
     
-    // Don't import products on server startup - this should only be done by generate-embeddings.mjs
-    // The database should already have products from running generate-embeddings.mjs
-
-    // Initialize RAG Application
     try {
-        const dbPath = path.join(path.dirname(fileURLToPath(import.meta.url)), VECTOR_DB_PATH);
+        console.log("Initializing MongoStore for RAG data...");
         
+        const MONGO_STORE_CONNECTION_URI_FROM_ENV = process.env.MONGO_STORE_CONNECTION_URI;
+
+        if (!MONGO_STORE_CONNECTION_URI_FROM_ENV || MONGO_STORE_CONNECTION_URI_FROM_ENV.trim() === "") {
+            console.error("CRITICAL: MONGO_STORE_CONNECTION_URI is not set in the environment. This is required for MongoStore.");
+            throw new Error("MONGO_STORE_CONNECTION_URI is not set. Cannot initialize MongoStore.");
+        }
+
+        const storeConfigForMongoStore = {
+            uri: MONGO_STORE_CONNECTION_URI_FROM_ENV, // Corrected property name
+            dbName: MONGO_DATABASE_STORE,
+            cacheCollectionName: MONGO_COLLECTION_CACHE,
+            customDataCollectionName: MONGO_COLLECTION_MEMORIES_AS_CUSTOM_DATA, // Map memories to customData collection
+            conversationCollectionName: MONGO_COLLECTION_CONVERSATIONS
+        };
+        
+        console.log(`MongoStore will use connection URI: ${MONGO_STORE_CONNECTION_URI_FROM_ENV.substring(0, MONGO_STORE_CONNECTION_URI_FROM_ENV.indexOf('@') > 0 ? MONGO_STORE_CONNECTION_URI_FROM_ENV.indexOf(':', MONGO_STORE_CONNECTION_URI_FROM_ENV.indexOf('//')+2)+1 : 30)}...`);
+        console.log("MongoStore config being passed to constructor:", JSON.stringify(storeConfigForMongoStore));
+
+        mongoStore = new MongoStore(storeConfigForMongoStore); 
+        
+        // MongoStore source shows init() is async and creates client, so await is correct.
+        if (typeof mongoStore.init === 'function') { 
+            console.log("Attempting to call mongoStore.init()...");
+            await mongoStore.init(); 
+        }
+        console.log("MongoStore initialized successfully.");
+
+    } catch (error) {
+        console.error("FATAL ERROR: Could not initialize MongoStore for RAG data. Exiting.", error);
+        process.exit(1);
+    }
+
+    try {
+        // Construct the Qdrant URL
+        const qdrantUrl = `http://${QDRANT_HOST}:${QDRANT_HTTP_PORT}`;
+        console.log(`Connecting RAG to Qdrant: URL: '${qdrantUrl}', Collection (ClusterName): '${QDRANT_COLLECTION_NAME}'`);
         console.log(`Configuring RAG with: Search Results: ${SEARCH_RESULT_COUNT}, Temperature: ${TEMPERATURE}, Embedding Batch Size: ${EMBEDDING_BATCH_SIZE}`);
+        
+        // Log Qdrant connection parameters just before use (apiKey is optional)
+        console.log(`QdrantDb PRE-INIT: URL: '${qdrantUrl}', API Key: '${QDRANT_API_KEY ? "Exists" : "Not Set"}', ClusterName: '${QDRANT_COLLECTION_NAME}'`);
 
         ragApplication = await new RAGApplicationBuilder()
             .setEmbeddingModel(new OpenAiEmbeddings({
-                apiKey: process.env.OPENAI_API_KEY, 
+                apiKey: OPENAI_API_KEY, 
                 batchSize: EMBEDDING_BATCH_SIZE 
             }))
-            .setModel(SIMPLE_MODELS.OPENAI_GPT4_O) // Use the model directly without trying to set apiKey on it
-            .setVectorDatabase(new LanceDb({ path: dbPath }))
+            .setModel(SIMPLE_MODELS.OPENAI_GPT4_O) 
+            .setVectorDatabase(new QdrantDb({
+              url: qdrantUrl,                     // Correct: Pass the full URL
+              apiKey: QDRANT_API_KEY,             // Correct: Pass apiKey directly (it's optional)
+              clusterName: QDRANT_COLLECTION_NAME // Correct: Use clusterName for the collection
+              // Note: checkCompatibility is not a parameter for this QdrantDb constructor
+            })) 
+            .setStore(mongoStore) 
             .setTemperature(TEMPERATURE)
             .setSearchResultCount(SEARCH_RESULT_COUNT)
             .build();
-        console.log("RAG Application initialized successfully.");
+        console.log("RAG Application initialized successfully (including MongoStore and QdrantDb).");
     } catch (error) {
         console.error("FATAL ERROR: Could not initialize RAG Application. Exiting.", error);
+        console.error('Ensure Qdrant & MongoStore are running and accessible, and embeddings are generated.');
         process.exit(1);
     }
-}
-
-// ========================================================================
-// MEMORY MANAGEMENT FUNCTIONS (Conceptual)
-// ========================================================================
-
-async function getUserId(req) {
-    // Example: if using Google Sign-In and verifyGoogleToken middleware:
-    // if (req.user && req.user.id) return req.user.id; // or req.user.email
-    return req.body.userId || req.query.userId || 'default_user'; // Placeholder
-}
-
-async function retrieveMemories(userId, currentQueryText) {
-    if (!ragApplication || !promptConfig) return "";
-    // console.log(`Retrieving memories for user: ${userId} based on query: ${currentQueryText}`);
-    // Placeholder: Implement actual LanceDB query for user-specific summaries
-    return "";
 }
 
 async function summarizeConversation(userId, conversationHistoryText) {
@@ -401,11 +365,8 @@ async function summarizeConversation(userId, conversationHistoryText) {
         .replace('{{userId}}', userId)
         .replace('{{conversationHistoryText}}', conversationHistoryText);
 
-    // console.log(`Summarizing conversation for user: ${userId} with prompt:\n${filledPrompt}`);
     try {
-        // Use the query method of ragApplication directly instead of trying to access model.call
         const result = await ragApplication.query(filledPrompt);
-        // Extract the answer from the result object
         const summary = result.answer || result.content || result.text || result.response || '';
         return summary;
     } catch (e) {
@@ -414,212 +375,13 @@ async function summarizeConversation(userId, conversationHistoryText) {
     }
 }
 
-async function storeMemory(userId, summaryText) {
-    if (!ragApplication || !promptConfig) return;
-    // console.log(`Storing memory for user: ${userId}, Summary: ${summaryText.substring(0,100)}...`);
-    // Placeholder: Implement actual storage to LanceDB with embeddings
-}
-
-// ========================================================================
-// EXPRESS APP SETUP
-// ========================================================================
-
-// ========================================================================
-// CHAT ENDPOINT
-// ========================================================================
-app.post('/chat', async (req, res) => {
-    if (!ragApplication || !promptConfig) {
-        return res.status(503).json({
-            answer: "Chatbot is not fully initialized. Please try again shortly.",
-            relatedProducts: []
-        });
-    }
-
-    const userQuery = req.body.query || req.body.question;
-    const user = req.body.user || {};
-    const userId = user.id || req.body.userId || req.query.userId || 'default_user';
-    const userName = user.name || '';
-    const children = user.children || [];
-
-    if (!userQuery) {
-        return res.status(400).json({ answer: "Query is required.", relatedProducts: [] });
-    }
-
-    // Check cache first
-    const cachedResult = queryCache.get(userId, userQuery, { name: userName, children });
-    if (cachedResult) {
-        console.log(`Cache hit for query: "${userQuery.substring(0, 30)}..." by user ${userId}`);
-        return res.json(cachedResult);
-    }
-
-    if (!conversationHistories[userId]) {
-        conversationHistories[userId] = [];
-    }
-
-    const longTermMemoryContext = await retrieveMemories(userId, userQuery);
-    const { systemPreamble, answerFieldDetails, relatedProductsFieldDetails, closingInstruction } = promptConfig.jsonOutputInstructions;
-    
-    let promptForRAG = `${systemPreamble}\n\n${answerFieldDetails}\n\n${relatedProductsFieldDetails}\n\n`;
-
-    // Inject user metadata
-    if (userName || (children && children.length > 0)) {
-      promptForRAG += `User profile:\n`;
-      if (userName) promptForRAG += `- Name: ${userName}\n`;
-      if (children.length > 0) {
-        promptForRAG += `- Children:\n`;
-        for (const child of children) {
-          promptForRAG += `  - Name: ${child.name || ''}, Age: ${child.age || ''}, Gender: ${child.gender || ''}, Birthday: ${child.birthday || ''}\n`;
-        }
-      }
-      promptForRAG += '\n';
-    }
-
-    if (longTermMemoryContext) {
-        promptForRAG += `Relevant past information for ${userId}:\n${longTermMemoryContext}\n\n`;
-    }
-
-    const shortTermHistoryText = conversationHistories[userId].join("\n");
-    if (shortTermHistoryText) {
-        promptForRAG += `Current conversation history:\n${shortTermHistoryText}\n\n`;
-    }
-
-    promptForRAG += `User's current query: ${userQuery}\n\n${closingInstruction}`;
-
-    // Log the prompt sent to the model
-    console.log("--- Prompt sent to LLM (/chat): ---");
-    console.log(promptForRAG);
-    console.log("-----------------------------------");
-
-    try {
-        // Add a timeout promise
-        const timeout = new Promise((_, reject) => {
-          setTimeout(() => reject(new Error('Request timed out after 15 seconds')), 15000);
-        });
-        
-        // Log warning about potential issue with SKUs
-        console.log("--- RAG Context Note (/chat) ---");
-        console.log("Executing RAG query - if no real SKUs are found, the LLM will return an empty array");
-        console.log("--------------------------------");
-        
-        // Race the RAG query against the timeout
-        const result = await Promise.race([
-          ragApplication.query(promptForRAG),
-          timeout
-        ]);
-        
-        // Log the complete result object for debugging
-        console.log("--- Complete RAG result object (/chat): ---");
-        console.log(JSON.stringify(result, null, 2));
-        console.log("----------------------------------");
-        
-        // Extract the LLM output from the result object
-        let llmOutputString = result.answer || result.content || result.text || result.response || '';
-
-        // Log the direct output from the LLM for debugging
-        console.log("--- /chat endpoint: LLM Raw Output (extracted) ---");
-        console.log(llmOutputString);
-        console.log("---------------------------------------------------");
-
-        let botResponseJson;
-        
-        try {
-            if (typeof llmOutputString !== 'string' || llmOutputString.trim() === "") {
-                console.error("/chat: LLM output is not a non-empty string. Value:", llmOutputString);
-                throw new Error("LLM output is not a non-empty string, cannot parse.");
-            }
-            
-            // Clean the output string if it contains markdown code fences
-            let cleanedOutput = llmOutputString;
-            if (llmOutputString.includes("```")) {
-                // Extract content from between code fences (```json ... ```)
-                const codeBlockMatch = llmOutputString.match(/```(?:json)?\s*([\s\S]*?)```/);
-                if (codeBlockMatch && codeBlockMatch[1]) {
-                    cleanedOutput = codeBlockMatch[1].trim();
-                }
-            }
-            
-            botResponseJson = JSON.parse(cleanedOutput);
-
-            // Validate the structure: answer (string) and relatedProducts (array of strings)
-            if (typeof botResponseJson.answer !== 'string' || !Array.isArray(botResponseJson.relatedProducts)) {
-                console.warn("/chat: LLM output was valid JSON but not the expected top-level structure. LLM Raw:", llmOutputString);
-                throw new Error("LLM output is not in the expected {answer: string, relatedProducts: array} format.");
-            }
-
-            // Validate that relatedProducts contains strings (SKUs)
-            for (let i = 0; i < botResponseJson.relatedProducts.length; i++) {
-                if (typeof botResponseJson.relatedProducts[i] !== 'string') {
-                    console.warn(`/chat: Item at index ${i} in relatedProducts is not a string. Converting to string.`);
-                    botResponseJson.relatedProducts[i] = String(botResponseJson.relatedProducts[i]);
-                }
-            }
-            
-            // Look up full product details from SQLite
-            console.log(`Looking up ${botResponseJson.relatedProducts.length} products by SKU in SQLite database`);
-            const productDetails = await getProductsBySKUs(botResponseJson.relatedProducts);
-            console.log(`Found ${productDetails.length} matching products in database`);
-            
-            // Replace the array of SKUs with the array of product objects
-            botResponseJson.relatedProducts = productDetails;
-            
-        } catch (e) {
-            console.error("/chat: Failed to parse LLM response as JSON or structure was invalid:", e.message);
-            console.error("/chat: LLM raw output:", llmOutputString);
-            botResponseJson = { // Fallback
-                answer: "I had a little trouble formatting my response perfectly with all details. Here's the main information: " + llmOutputString,
-                relatedProducts: []
-            };
-        }
-
-        // Update short-term history ONLY if the answer is valid
-        if (botResponseJson && typeof botResponseJson.answer === 'string' && botResponseJson.answer.trim() !== '' && botResponseJson.answer.indexOf('I had a little trouble formatting my response') === -1) {
-            conversationHistories[userId].push(`User: ${userQuery}`);
-            conversationHistories[userId].push(`Bot: ${botResponseJson.answer}`);
-        }
-
-        if (conversationHistories[userId].length > 20) {
-            conversationHistories[userId] = conversationHistories[userId].slice(-20);
-        }
-
-        // Trigger summarization if needed
-        if (conversationHistories[userId].length % 10 === 0 && conversationHistories[userId].length >= 10) {
-            const summary = await summarizeConversation(userId, conversationHistories[userId].join("\n"));
-            await storeMemory(userId, summary);
-        }
-
-        // Store valid responses in cache
-        if (botResponseJson && typeof botResponseJson.answer === 'string' && 
-            botResponseJson.answer.trim() !== '' && 
-            botResponseJson.answer.indexOf('I had a little trouble formatting my response') === -1) {
-            queryCache.set(userId, userQuery, { name: userName, children }, botResponseJson);
-        }
-
-        res.json(botResponseJson);
-    } catch (error) {
-        console.error("Error during RAG query for structured output:", error);
-        res.status(500).json({
-            answer: "Sorry, I encountered an error trying to process your request.",
-            relatedProducts: []
-        });
-    }
-});
-
-// ========================================================================
-// START SERVER
-// ========================================================================
-
-// Function to get all network IP addresses
 function getNetworkIPs() {
   const nets = networkInterfaces();
   const results = {};
-
   for (const name of Object.keys(nets)) {
     for (const net of nets[name]) {
-      // Skip over non-IPv4 and internal (loopback) addresses
       if (net.family === 'IPv4' && !net.internal) {
-        if (!results[name]) {
-          results[name] = [];
-        }
+        if (!results[name]) results[name] = [];
         results[name].push(net.address);
       }
     }
@@ -627,20 +389,20 @@ function getNetworkIPs() {
   return results;
 }
 
-// Graceful shutdown handler
 process.on('SIGINT', async () => {
     console.log('Shutting down gracefully...');
+    if (mongoStore && typeof mongoStore.close === 'function') {
+        await mongoStore.close();
+        console.log('MongoStore connection closed.');
+    }
     await closeDatabase();
     process.exit(0);
 });
 
 initializeApp().then(() => {
-    // Start server, listening on all network interfaces (0.0.0.0)
     app.listen(PORT, '0.0.0.0', () => {
-        console.log(`Server running on port ${PORT}. RAG App and Prompts Initialized.`);
+        console.log(`Server running on port ${PORT}. RAG App, Prompts, Product DB, and MongoStore Initialized.`);
         console.log(`Local URL: http://localhost:${PORT}`);
-        
-        // Display all network IPs
         const networkIPs = getNetworkIPs();
         if (Object.keys(networkIPs).length > 0) {
             console.log('Network URLs:');

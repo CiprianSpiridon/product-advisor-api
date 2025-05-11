@@ -1,0 +1,42 @@
+{
+    "name": "@llm-tools/embedjs-mongodb",
+    "version": "0.1.28",
+    "description": "Add MongoDB support to embedjs",
+    "dependencies": {
+        "@llm-tools/embedjs-interfaces": "0.1.28",
+        "debug": "^4.4.0",
+        "mongodb": "^6.12.0"
+    },
+    "type": "module",
+    "main": "./lib/index.js",
+    "license": "Apache-2.0",
+    "publishConfig": {
+        "access": "public"
+    },
+    "keywords": [
+        "llm",
+        "ai",
+        "gpt3",
+        "chain",
+        "prompt",
+        "prompt engineering",
+        "chatgpt",
+        "machine learning",
+        "ml",
+        "anthropic",
+        "embeddings",
+        "vectorstores"
+    ],
+    "author": "K V Adhityan",
+    "bugs": {
+        "url": "https://github.com/llm-tools/embedjs/issues"
+    },
+    "homepage": "https://github.com/llm-tools/embedjs#readme",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/llm-tools/embedjs.git"
+    },
+    "devDependencies": {
+        "typescript": "^5.8.3"
+    }
+}

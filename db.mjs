@@ -1,63 +1,72 @@
-import sqlite3 from 'sqlite3';
-import { open } from 'sqlite';
+import { MongoClient } from 'mongodb';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { parse } from 'csv-parse/sync';
 
-// SQLite database setup
+let client = null;
 let db = null;
 
+const MONGO_URI = process.env.MONGO_STORE_CONNECTION_URI;
+const MONGO_DB_NAME = process.env.MONGO_DATABASE || 'product_db';
+const PRODUCTS_COLLECTION = process.env.MONGO_COLLECTION_PRODUCTS || 'products';
+
+// Fallback if URI is not provided
+const MONGO_USER = process.env.MONGO_INITDB_ROOT_USERNAME;
+const MONGO_PASSWORD = process.env.MONGO_INITDB_ROOT_PASSWORD;
+const MONGO_HOST = process.env.MONGO_HOST || 'mongo';
+const MONGO_PORT = process.env.MONGO_PORT || '27017';
+
 export async function initDatabase() {
+  if (db) {
+    console.log('MongoDB already connected.');
+    return true;
+  }
+
+  let connectionUri = MONGO_URI;
+  if (!connectionUri) {
+    if (!MONGO_USER || !MONGO_PASSWORD) {
+      console.warn('MongoDB URI not provided and root credentials are not fully set. Attempting to connect without auth. This may fail or be insecure.');
+      connectionUri = `mongodb://${MONGO_HOST}:${MONGO_PORT}/${MONGO_DB_NAME}`;
+    } else {
+      connectionUri = `mongodb://${encodeURIComponent(MONGO_USER)}:${encodeURIComponent(MONGO_PASSWORD)}@${MONGO_HOST}:${MONGO_PORT}/${MONGO_DB_NAME}?authSource=admin`;
+    }
+  }
+
   try {
-    const dbPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'products.db');
+    client = new MongoClient(connectionUri);
+    await client.connect();
+    db = client.db(MONGO_DB_NAME); // Ensure we are using the correct database name
+    console.log(`Connected to MongoDB: ${connectionUri.replace(/:([^:@\/]+)@/, ':<password>@')}`); // Log URI safely
     
-    // Open database connection
-    db = await open({
-      filename: dbPath,
-      driver: sqlite3.Database
-    });
-    
-    console.log('Connected to SQLite database');
-    
-    // Create products table if it doesn't exist
-    await db.exec(`
-      CREATE TABLE IF NOT EXISTS products (
-        sku TEXT PRIMARY KEY,
-        name TEXT,
-        brand_default_store TEXT,
-        description TEXT,
-        features TEXT,
-        recom_age TEXT,
-        top_category TEXT,
-        secondary_category TEXT,
-        action TEXT,
-        url TEXT,
-        image TEXT,
-        objectID TEXT,
-        price TEXT
-      )
-    `);
-    
+    // Ensure indexes for products collection (optional, but good for performance)
+    try {
+        const productsCollection = db.collection(PRODUCTS_COLLECTION);
+        await productsCollection.createIndex({ sku: 1 }, { unique: true });
+        await productsCollection.createIndex({ name: "text" }); // For text search on name
+        console.log(`Ensured indexes on ${PRODUCTS_COLLECTION} collection.`);
+    } catch (indexError) {
+        console.warn(`Could not ensure indexes on ${PRODUCTS_COLLECTION}: ${indexError.message}. This might happen if run in parallel or with insufficient permissions.`);
+    }
+
     return true;
   } catch (error) {
-    console.error('Error initializing database:', error);
+    console.error('Error initializing MongoDB database:', error);
+    client = null; // Reset client on error
+    db = null; // Reset db on error
     return false;
   }
 }
 
 export async function importProductsFromCSV(csvPath) {
   if (!db) {
-    console.error('Database not initialized');
+    console.error('MongoDB not initialized. Call initDatabase() first.');
     return false;
   }
-  
-  let stmt = null;
-  
+
   try {
-    console.log(`Importing products from ${csvPath}`);
+    console.log(`Importing products from ${csvPath} into MongoDB collection: ${PRODUCTS_COLLECTION}`);
     
-    // Read and parse CSV
     const csvFileContent = fs.readFileSync(csvPath, 'utf8');
     const products = parse(csvFileContent, {
       columns: true,
@@ -65,85 +74,35 @@ export async function importProductsFromCSV(csvPath) {
     });
     
     console.log(`Found ${products.length} products in CSV file`);
-    
-    // Begin transaction for faster inserts
-    await db.exec('BEGIN TRANSACTION');
-    
-    // Prepare REPLACE statement instead of INSERT to handle duplicates
-    stmt = await db.prepare(`
-      REPLACE INTO products (
-        sku, name, brand_default_store, description, features, 
-        recom_age, top_category, secondary_category, action, 
-        url, image, objectID, price
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    
-    // Insert/replace products
-    let replacedCount = 0;
-    let insertedCount = 0;
-    
-    for (const product of products) {
-      // Check if product already exists to track stats
-      const existing = await db.get('SELECT 1 FROM products WHERE sku = ?', product.sku || '');
-      
-      await stmt.run([
-        product.sku || '',
-        product.name || '',
-        product.brand_default_store || '',
-        product.description || '',
-        product.features || '',
-        product.recom_age || '',
-        product.top_category || '',
-        product.secondary_category || '',
-        product.action || '',
-        product.url || '',
-        product.image || '',
-        product.objectID || '',
-        product.price || ''
-      ]);
-      
-      if (existing) {
-        replacedCount++;
-      } else {
-        insertedCount++;
-      }
+    if (products.length === 0) {
+      console.log('No products to import.');
+      return true;
     }
+
+    const productsCollection = db.collection(PRODUCTS_COLLECTION);
     
-    // Finalize the statement properly
-    if (stmt) {
-      await stmt.finalize();
-      stmt = null;
-    }
-    
-    // Commit transaction
-    await db.exec('COMMIT');
-    console.log(`Imported ${products.length} products into database (${insertedCount} new, ${replacedCount} replaced)`);
-    
-    // Create indices for better search performance
-    await db.exec('CREATE INDEX IF NOT EXISTS idx_sku ON products(sku)');
-    await db.exec('CREATE INDEX IF NOT EXISTS idx_name ON products(name)');
+    // Prepare bulk operations for efficient upsert
+    const operations = products.map(product => ({
+      updateOne: {
+        filter: { sku: product.sku || 'N/A' }, // Ensure SKU is present, provide a default if not
+        update: { $set: product },
+        upsert: true,
+      },
+    }));
+
+    const result = await productsCollection.bulkWrite(operations);
+    console.log(`Imported products into MongoDB: ${result.upsertedCount} new, ${result.modifiedCount} updated, ${result.matchedCount} matched.`);
     
     return true;
   } catch (error) {
-    // Rollback in case of error
-    await db.exec('ROLLBACK');
-    console.error('Error importing products:', error);
+    console.error('Error importing products to MongoDB:', error);
     return false;
-  } finally {
-    // Ensure statement is finalized even in case of error
-    if (stmt) {
-      try {
-        await stmt.finalize();
-      } catch (err) {
-        console.error('Error finalizing statement:', err);
-      }
-    }
   }
 }
 
 export async function getProductsBySKUs(skus) {
   if (!db) {
-    console.error('Database not initialized');
+    console.error('MongoDB not initialized. Call initDatabase() first.');
     return [];
   }
   
@@ -152,25 +111,25 @@ export async function getProductsBySKUs(skus) {
       return [];
     }
     
-    // Create placeholders for the query
-    const placeholders = skus.map(() => '?').join(',');
-    
-    // Get products by SKUs
-    const products = await db.all(
-      `SELECT * FROM products WHERE sku IN (${placeholders})`,
-      skus
-    );
+    const productsCollection = db.collection(PRODUCTS_COLLECTION);
+    const products = await productsCollection.find({ sku: { $in: skus } }).toArray();
     
     return products;
   } catch (error) {
-    console.error('Error fetching products by SKUs:', error);
+    console.error('Error fetching products by SKUs from MongoDB:', error);
     return [];
   }
 }
 
 export async function closeDatabase() {
-  if (db) {
-    await db.close();
-    console.log('Database connection closed');
+  if (client) {
+    try {
+      await client.close();
+      console.log('MongoDB connection closed');
+    } catch (error) {
+      console.error('Error closing MongoDB connection:', error);
+    }
+    client = null;
+    db = null;
   }
 } 
